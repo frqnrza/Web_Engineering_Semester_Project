@@ -13,6 +13,7 @@ const userSchema = new mongoose.Schema({
   password: {
     type: String,
     required: function() {
+      // Password not required if using Google Auth
       return !this.googleId;
     },
     minlength: [6, 'Password must be at least 6 characters']
@@ -58,6 +59,8 @@ const userSchema = new mongoose.Schema({
   resetPasswordExpires: Date,
   emailVerificationToken: String,
   emailVerificationExpires: Date,
+  
+  // Login Security
   failedLoginAttempts: {
     type: Number,
     default: 0
@@ -67,35 +70,37 @@ const userSchema = new mongoose.Schema({
     default: false
   },
   lockUntil: Date,
+  
   refreshTokens: [{
     token: String,
-    createdAt: Date,
+    createdAt: { type: Date, default: Date.now },
     expiresAt: Date
   }],
   lastLogin: Date
 }, {
   timestamps: true,
-  toJSON: { virtuals: true }, // Include virtuals when converting to JSON
-  toObject: { virtuals: true } // Include virtuals when converting to object
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
 });
 
-// Hash password before saving
-userSchema.pre('save', async function() {
+// ✅ FIXED: Robust Password Hashing Hook
+userSchema.pre('save', async function(next) {
   // Only run if password is modified
   if (!this.isModified('password')) {
-    return;
+    return next();
   }
   
-  // Skip if using OAuth without password
-  if (this.googleId && !this.password) {
-    return;
+  // Skip if password is empty (e.g. OAuth user update)
+  if (!this.password) {
+    return next();
   }
   
   try {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
+    next();
   } catch (error) {
-    throw error;
+    next(error);
   }
 });
 
@@ -110,46 +115,45 @@ userSchema.methods.isLocked = function() {
   return this.accountLocked && this.lockUntil && this.lockUntil > Date.now();
 };
 
-// Increment failed login attempts
+// ✅ FIXED: Modify Instance instead of DB directly (prevents overwrite race conditions)
 userSchema.methods.incLoginAttempts = async function() {
+  // If lock has expired, reset
   if (this.lockUntil && this.lockUntil < Date.now()) {
-    return await this.updateOne({
-      $set: { failedLoginAttempts: 1 },
-      $unset: { lockUntil: 1, accountLocked: 1 }
-    });
+    this.failedLoginAttempts = 1;
+    this.lockUntil = undefined;
+    this.accountLocked = false;
+  } else {
+    // Otherwise increment
+    this.failedLoginAttempts += 1;
+    
+    // Lock if max attempts reached
+    if (this.failedLoginAttempts >= 5) {
+      this.accountLocked = true;
+      this.lockUntil = Date.now() + 30 * 60 * 1000; // 30 mins
+    }
   }
   
-  const updates = { $inc: { failedLoginAttempts: 1 } };
-  
-  if (this.failedLoginAttempts + 1 >= 5) {
-    updates.$set = { 
-      accountLocked: true, 
-      lockUntil: Date.now() + 30 * 60 * 1000 
-    };
-  }
-  
-  return await this.updateOne(updates);
+  return await this.save();
 };
 
-// Reset login attempts
+// ✅ FIXED: Modify Instance directly
 userSchema.methods.resetLoginAttempts = async function() {
-  return await this.updateOne({
-    $set: { failedLoginAttempts: 0, lastLogin: Date.now() },
-    $unset: { lockUntil: 1, accountLocked: 1 }
-  });
+  this.failedLoginAttempts = 0;
+  this.accountLocked = false;
+  this.lockUntil = undefined;
+  this.lastLogin = Date.now();
+  return await this.save();
 };
 
 // ==========================================
-// Step 7: Add Virtual Field and Company Methods
+// Virtual Field and Company Methods
 // ==========================================
 
 // Virtual field to get company ID easily
 userSchema.virtual('companyId').get(function() {
-  // This will be populated when needed
   return this._companyId;
 });
 
-// Setter for company ID
 userSchema.virtual('companyId').set(function(companyId) {
   this._companyId = companyId;
 });
@@ -158,16 +162,12 @@ userSchema.virtual('companyId').set(function(companyId) {
 userSchema.methods.getCompanyId = async function() {
   if (this.type !== 'company') return null;
   
-  // If company ID is already set in virtual field, return it
-  if (this._companyId) {
-    return this._companyId;
-  }
+  if (this._companyId) return this._companyId;
   
   const Company = mongoose.model('Company');
   const company = await Company.findOne({ userId: this._id });
   
   if (company) {
-    // Cache the company ID in virtual field
     this._companyId = company._id;
     return company._id;
   }
@@ -183,31 +183,11 @@ userSchema.methods.getCompanyProfile = async function() {
   const company = await Company.findOne({ userId: this._id });
   
   if (company) {
-    // Cache the company ID
     this._companyId = company._id;
   }
   
   return company;
 };
-
-// Method to check if user has a company profile
-userSchema.methods.hasCompanyProfile = async function() {
-  if (this.type !== 'company') return false;
-  
-  const Company = mongoose.model('Company');
-  const company = await Company.findOne({ userId: this._id });
-  
-  if (company) {
-    this._companyId = company._id;
-    return true;
-  }
-  
-  return false;
-};
-
-// ==========================================
-// Existing methods
-// ==========================================
 
 // Remove sensitive data when converting to JSON
 userSchema.methods.toJSON = function() {
@@ -220,18 +200,14 @@ userSchema.methods.toJSON = function() {
   delete user.emailVerificationExpires;
   delete user.failedLoginAttempts;
   delete user.lockUntil;
-  delete user._companyId; // Don't expose internal field
+  delete user._companyId;
+  delete user.__v;
   return user;
 };
 
 // Static method to find by email
 userSchema.statics.findByEmail = function(email) {
   return this.findOne({ email: email.toLowerCase().trim() });
-};
-
-// Static method to find company users
-userSchema.statics.findCompanies = function() {
-  return this.find({ type: 'company' }).populate('companyProfile');
 };
 
 module.exports = mongoose.model('User', userSchema);

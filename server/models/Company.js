@@ -176,7 +176,9 @@ const companySchema = new mongoose.Schema({
     default: 0
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
 });
 
 // ✅ ADDED: Text index for search
@@ -197,14 +199,5 @@ companySchema.index({ verificationStatus: 1 });
 companySchema.virtual('rating').get(function() {
   return this.ratings.average;
 });
-
-// ✅ FIXED: Removed the problematic pre-save middleware that was causing "next is not a function" error
-// The virtual getter will handle this automatically, no need for pre-save middleware
-// companySchema.pre('save', function(next) {
-//   if (this.isModified('ratings.average')) {
-//     this.rating = this.ratings.average;
-//   }
-//   next();
-// });
 
 module.exports = mongoose.model('Company', companySchema);

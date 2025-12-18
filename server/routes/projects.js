@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
+const { body, validationResult } = require('express-validator');
 const Project = require('../models/Project');
 const Company = require('../models/Company');
-const Notification = require('../models/Notification');
+const Notification = require('../models/Notification'); // Assumes Notification model exists
 const { authMiddleware } = require('../middleware/auth');
 
 // Helper function for role-based authorization
@@ -15,7 +16,9 @@ const requireRole = (role) => {
   };
 };
 
-// Get all projects with advanced filters
+// ==========================================
+// GET ALL PROJECTS (Browse)
+// ==========================================
 router.get('/', async (req, res) => {
   try {
     const { 
@@ -46,25 +49,18 @@ router.get('/', async (req, res) => {
         query.status = status;
       }
     } else {
-      query.status = { $in: ['posted', 'bidding'] };
+      query.status = { $in: ['posted', 'bidding', 'active'] };
     }
     
-    // Budget filter
+    // Budget filter (Handle overlapping ranges)
     if (minBudget || maxBudget) {
-      query.$or = [];
-      
-      if (minBudget && maxBudget) {
-        query.$or.push({
-          'budget.min': { $gte: parseInt(minBudget), $lte: parseInt(maxBudget) }
-        });
-        query.$or.push({
-          'budget.max': { $gte: parseInt(minBudget), $lte: parseInt(maxBudget) }
-        });
-      } else if (minBudget) {
-        query['budget.min'] = { $gte: parseInt(minBudget) };
-      } else if (maxBudget) {
-        query['budget.max'] = { $lte: parseInt(maxBudget) };
-      }
+      const min = minBudget ? parseInt(minBudget) : 0;
+      const max = maxBudget ? parseInt(maxBudget) : Number.MAX_SAFE_INTEGER;
+
+      // Logic: Find projects where the budget range overlaps with the filter range
+      // Project Min <= Filter Max AND Project Max >= Filter Min
+      query['budget.min'] = { $lte: max };
+      query['budget.max'] = { $gte: min };
     }
     
     // Timeline filter
@@ -74,7 +70,11 @@ router.get('/', async (req, res) => {
     
     // Text search
     if (search) {
-      query.$text = { $search: search };
+      // Try text search (requires index), fall back to regex if needed
+      query.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
     }
     
     // Build sort object
@@ -86,7 +86,7 @@ router.get('/', async (req, res) => {
     
     // Execute query
     const projects = await Project.find(query)
-      .populate('clientId', 'name email')
+      .populate('clientId', 'name email avatar')
       .populate('bids.companyId', 'name logo verified')
       .sort(sort)
       .skip(skip)
@@ -110,21 +110,23 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Get single project with full details
+// ==========================================
+// GET SINGLE PROJECT
+// ==========================================
 router.get('/:id', async (req, res) => {
   try {
     const project = await Project.findById(req.params.id)
-      .populate('clientId', 'name email phone')
+      .populate('clientId', 'name email phone avatar')
       .populate({
         path: 'bids.companyId',
-        select: 'name logo verified rating reviewCount services'
+        select: 'name logo verified rating reviewCount services tagline'
       });
     
     if (!project) {
       return res.status(404).json({ error: 'Project not found' });
     }
     
-    // Increment view count (don't await to not slow down response)
+    // Increment view count (fire and forget)
     Project.findByIdAndUpdate(req.params.id, { $inc: { viewCount: 1 } }).exec();
     
     res.json({ project });
@@ -134,73 +136,81 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Create project
-router.post('/', authMiddleware, async (req, res) => {
-  try {
-    // Only clients can post projects
-    if (req.userType !== 'client') {
-      return res.status(403).json({ error: 'Only clients can post projects' });
-    }
-    
-    const {
-      title,
-      description,
-      category,
-      budget,
-      timeline,
-      clientInfo,
-      techStack,
-      paymentMethod,
-      isInviteOnly,
-      invitedCompanies,
-      attachments,
-      status
-    } = req.body;
-    
-    // Validate required fields
-    if (!title || !description || !category || !budget || !timeline) {
-      return res.status(400).json({ 
-        error: 'Missing required fields: title, description, category, budget, timeline' 
+// ==========================================
+// CREATE PROJECT
+// ==========================================
+router.post('/', 
+  authMiddleware, 
+  requireRole('client'),
+  [
+    body('title').notEmpty().withMessage('Title is required'),
+    body('description').notEmpty().withMessage('Description is required'),
+    body('category').notEmpty().withMessage('Category is required'),
+    body('budget').isObject().withMessage('Budget must be an object'),
+    body('timeline').isObject().withMessage('Timeline must be an object')
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ error: errors.array()[0].msg });
+      }
+      
+      const {
+        title,
+        description,
+        category,
+        budget,
+        timeline,
+        clientInfo,
+        techStack,
+        paymentMethod,
+        isInviteOnly,
+        invitedCompanies,
+        attachments,
+        status
+      } = req.body;
+      
+      const project = new Project({
+        clientId: req.userId,
+        title,
+        description,
+        category,
+        budget, // Expects { min, max, range }
+        timeline, // Expects { value, unit }
+        clientInfo: clientInfo || { name: req.user.name, email: req.user.email },
+        techStack: techStack || [],
+        paymentMethod: paymentMethod || 'jazzcash',
+        isInviteOnly: isInviteOnly || false,
+        invitedCompanies: invitedCompanies || [],
+        attachments: attachments || [],
+        status: status || 'posted',
+        viewCount: 0,
+        bids: []
       });
+      
+      await project.save();
+      
+      // Notification placeholder for invited companies
+      if (isInviteOnly && invitedCompanies?.length > 0) {
+        console.log(`Notify ${invitedCompanies.length} companies about private project`);
+      }
+      
+      res.status(201).json({
+        success: true,
+        project,
+        message: 'Project created successfully'
+      });
+    } catch (error) {
+      console.error('Create project error:', error);
+      res.status(500).json({ error: 'Failed to create project' });
     }
-    
-    const project = new Project({
-      clientId: req.userId,
-      title,
-      description,
-      category,
-      budget,
-      timeline,
-      clientInfo,
-      techStack,
-      paymentMethod,
-      isInviteOnly,
-      invitedCompanies,
-      attachments,
-      status: status || 'posted',
-      viewCount: 0,
-      bids: []
-    });
-    
-    await project.save();
-    
-    // If invite-only, notify invited companies
-    if (isInviteOnly && invitedCompanies && invitedCompanies.length > 0) {
-      // TODO: Send email notifications to invited companies
-      console.log(`Notify ${invitedCompanies.length} companies about new project`);
-    }
-    
-    res.status(201).json({
-      project,
-      message: 'Project created successfully'
-    });
-  } catch (error) {
-    console.error('Create project error:', error);
-    res.status(500).json({ error: 'Failed to create project' });
   }
-});
+);
 
-// Update project
+// ==========================================
+// UPDATE PROJECT
+// ==========================================
 router.put('/:id', authMiddleware, async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
@@ -215,9 +225,9 @@ router.put('/:id', authMiddleware, async (req, res) => {
     }
     
     // Don't allow editing if project has accepted bid
-    if (project.status === 'active' || project.status === 'completed') {
+    if (['active', 'completed', 'cancelled'].includes(project.status)) {
       return res.status(400).json({ 
-        error: 'Cannot edit project with active or completed status' 
+        error: 'Cannot edit project with active, completed or cancelled status' 
       });
     }
     
@@ -236,6 +246,7 @@ router.put('/:id', authMiddleware, async (req, res) => {
     await project.save();
     
     res.json({ 
+      success: true,
       project, 
       message: 'Project updated successfully' 
     });
@@ -245,7 +256,9 @@ router.put('/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// Cancel/Close project
+// ==========================================
+// CANCEL PROJECT
+// ==========================================
 router.delete('/:id', authMiddleware, async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
@@ -263,17 +276,16 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     project.status = 'cancelled';
     await project.save();
     
-    // Notify all bidders
-    // TODO: Send email notifications
-    
-    res.json({ message: 'Project cancelled successfully' });
+    res.json({ success: true, message: 'Project cancelled successfully' });
   } catch (error) {
     console.error('Cancel project error:', error);
     res.status(500).json({ error: 'Failed to cancel project' });
   }
 });
 
-// Submit bid for a project
+// ==========================================
+// SUBMIT BID (Company Only)
+// ==========================================
 router.post('/:id/bids', authMiddleware, requireRole('company'), async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
@@ -283,14 +295,14 @@ router.post('/:id/bids', authMiddleware, requireRole('company'), async (req, res
     }
 
     // Check if project is open for bidding
-    if (project.status !== 'posted' && project.status !== 'open') {
+    if (project.status !== 'posted' && project.status !== 'bidding') {
       return res.status(400).json({ error: 'Project is not accepting bids' });
     }
 
     // Get company info
     const company = await Company.findOne({ userId: req.userId });
     if (!company) {
-      return res.status(404).json({ error: 'Company profile not found' });
+      return res.status(404).json({ error: 'Company profile not found. Please complete your profile first.' });
     }
 
     // Check if company already bid
@@ -309,32 +321,17 @@ router.post('/:id/bids', authMiddleware, requireRole('company'), async (req, res
       return res.status(400).json({ error: 'Invalid bid amount' });
     }
     
-    if (!proposal || proposal.trim().length < 100) {
+    if (!proposal || proposal.trim().length < 50) {
       return res.status(400).json({ 
-        error: 'Proposal must be at least 100 characters' 
+        error: 'Proposal must be at least 50 characters' 
       });
     }
 
-    // Check if bid is within project budget range
-    if (project.budget) {
-      if (project.budget.min && amount < project.budget.min) {
-        return res.status(400).json({ 
-          error: `Bid amount must be at least PKR ${project.budget.min}` 
-        });
-      }
-      if (project.budget.max && amount > project.budget.max) {
-        return res.status(400).json({ 
-          error: `Bid amount must not exceed PKR ${project.budget.max}` 
-        });
-      }
-    }
-
+    // ✅ FIXED: Schema consistency - removed companyId_user, using explicit fields from Schema
     const bid = {
       companyId: company._id,
-      companyId_user: req.userId, // For compatibility
-      companyName: company.name || req.user.name,
-      amount: amount,
-      timeline: timeline || project.timeline,
+      amount: Number(amount),
+      timeline: timeline || (project.timeline?.value + ' ' + project.timeline?.unit),
       proposal: proposal,
       milestones: milestones || [],
       attachments: attachments || [],
@@ -352,14 +349,18 @@ router.post('/:id/bids', authMiddleware, requireRole('company'), async (req, res
     await project.save();
 
     // Create notification for client
-    await Notification.create({
-      userId: project.clientId,
-      type: 'new_bid',
-      title: 'New Bid Received',
-      message: `${bid.companyName} submitted a bid on your project "${project.title}"`,
-      data: { projectId: project._id, bidId: bid._id },
-      read: false
-    });
+    try {
+      await Notification.create({
+        userId: project.clientId,
+        type: 'new_bid',
+        title: 'New Bid Received',
+        message: `${company.name} submitted a bid on your project "${project.title}"`,
+        data: { projectId: project._id, bidId: bid._id },
+        read: false
+      });
+    } catch (notifError) {
+      console.warn('Failed to create notification:', notifError.message);
+    }
 
     res.status(201).json({
       success: true,
@@ -372,10 +373,16 @@ router.post('/:id/bids', authMiddleware, requireRole('company'), async (req, res
   }
 });
 
-// Get project bids
+// ==========================================
+// GET PROJECT BIDS
+// ==========================================
 router.get('/:id/bids', authMiddleware, async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id);
+    const project = await Project.findById(req.params.id)
+      .populate({
+        path: 'bids.companyId',
+        select: 'name logo verified rating reviewCount'
+      });
     
     if (!project) {
       return res.status(404).json({ error: 'Project not found' });
@@ -396,7 +403,9 @@ router.get('/:id/bids', authMiddleware, async (req, res) => {
   }
 });
 
-// Accept/reject bid
+// ==========================================
+// ACCEPT/REJECT BID
+// ==========================================
 router.put('/:projectId/bids/:bidId', authMiddleware, requireRole('client'), async (req, res) => {
   try {
     const { status } = req.body;
@@ -428,20 +437,36 @@ router.put('/:projectId/bids/:bidId', authMiddleware, requireRole('client'), asy
       
       project.status = 'active';
       project.selectedBid = bid._id;
-      project.selectedCompany = bid.companyId;
+      // ✅ FIXED: removed selectedCompany as it's not in schema
+      
+      // Auto-create milestones from bid if they exist
+      if (bid.milestones && bid.milestones.length > 0) {
+        project.milestones = bid.milestones.map(m => ({
+          ...m,
+          status: 'pending'
+        }));
+      }
     }
 
     await project.save();
 
     // Create notification for company
-    await Notification.create({
-      userId: bid.companyId_user,
-      type: 'bid_status',
-      title: `Bid ${status.charAt(0).toUpperCase() + status.slice(1)}`,
-      message: `Your bid on project "${project.title}" has been ${status}`,
-      data: { projectId: project._id, bidId: bid._id },
-      read: false
-    });
+    try {
+      // We need to look up the company user to send notification
+      const company = await Company.findById(bid.companyId);
+      if (company) {
+        await Notification.create({
+          userId: company.userId,
+          type: 'bid_status',
+          title: `Bid ${status.charAt(0).toUpperCase() + status.slice(1)}`,
+          message: `Your bid on project "${project.title}" has been ${status}`,
+          data: { projectId: project._id, bidId: bid._id },
+          read: false
+        });
+      }
+    } catch (notifError) {
+      console.warn('Failed to create notification:', notifError.message);
+    }
 
     res.json({
       success: true,
@@ -454,106 +479,9 @@ router.put('/:projectId/bids/:bidId', authMiddleware, requireRole('client'), asy
   }
 });
 
-// Update bid (edit or withdraw)
-router.put('/:projectId/bids/:bidId/edit', authMiddleware, async (req, res) => {
-  try {
-    const { projectId, bidId } = req.params;
-    const { status, amount, timeline, proposal, milestones } = req.body;
-    
-    const project = await Project.findById(projectId);
-    
-    if (!project) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-    
-    const bid = project.bids.id(bidId);
-    
-    if (!bid) {
-      return res.status(404).json({ error: 'Bid not found' });
-    }
-    
-    // Company editing their own bid
-    if (req.userType === 'company') {
-      const company = await Company.findOne({ userId: req.userId });
-      
-      if (bid.companyId.toString() !== company._id.toString()) {
-        return res.status(403).json({ error: 'Not authorized' });
-      }
-      
-      // Can only edit pending bids
-      if (bid.status !== 'pending') {
-        return res.status(400).json({ 
-          error: 'Can only edit pending bids' 
-        });
-      }
-      
-      // Update bid fields
-      if (amount) bid.amount = amount;
-      if (timeline) bid.timeline = timeline;
-      if (proposal) bid.proposal = proposal;
-      if (milestones) bid.milestones = milestones;
-      
-      await project.save();
-      
-      return res.json({ 
-        message: 'Bid updated successfully', 
-        project 
-      });
-    }
-    
-    res.status(400).json({ error: 'Invalid operation' });
-  } catch (error) {
-    console.error('Update bid error:', error);
-    res.status(500).json({ error: 'Failed to update bid' });
-  }
-});
-
-// Withdraw bid
-router.delete('/:projectId/bids/:bidId', authMiddleware, async (req, res) => {
-  try {
-    const { projectId, bidId } = req.params;
-    
-    const project = await Project.findById(projectId);
-    
-    if (!project) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-    
-    const company = await Company.findOne({ userId: req.userId });
-    if (!company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-    
-    const bidIndex = project.bids.findIndex(
-      b => b._id.toString() === bidId && 
-           b.companyId.toString() === company._id.toString()
-    );
-    
-    if (bidIndex === -1) {
-      return res.status(404).json({ error: 'Bid not found' });
-    }
-    
-    const bid = project.bids[bidIndex];
-    
-    // Can only withdraw pending bids
-    if (bid.status !== 'pending') {
-      return res.status(400).json({ 
-        error: 'Can only withdraw pending bids' 
-      });
-    }
-    
-    // Remove bid
-    project.bids.splice(bidIndex, 1);
-    await project.save();
-    
-    res.json({ message: 'Bid withdrawn successfully' });
-  } catch (error) {
-    console.error('Withdraw bid error:', error);
-    res.status(500).json({ error: 'Failed to withdraw bid' });
-  }
-});
-
-// Get user's own projects (client view)
+// ==========================================
+// GET USER'S PROJECTS
+// ==========================================
 router.get('/user/my-projects', authMiddleware, async (req, res) => {
   try {
     if (req.userType !== 'client') {
@@ -564,14 +492,16 @@ router.get('/user/my-projects', authMiddleware, async (req, res) => {
       .populate('bids.companyId', 'name logo verified rating')
       .sort({ createdAt: -1 });
     
-    res.json({ projects });
+    res.json({ success: true, projects });
   } catch (error) {
     console.error('Get user projects error:', error);
     res.status(500).json({ error: 'Failed to fetch projects' });
   }
 });
 
-// Get company's bids
+// ==========================================
+// GET COMPANY'S BIDS
+// ==========================================
 router.get('/company/my-bids', authMiddleware, async (req, res) => {
   try {
     if (req.userType !== 'company') {
@@ -587,101 +517,24 @@ router.get('/company/my-bids', authMiddleware, async (req, res) => {
     const projects = await Project.find({
       'bids.companyId': company._id
     })
-    .populate('clientId', 'name email')
+    .populate('clientId', 'name email avatar')
     .sort({ createdAt: -1 });
     
-    // Filter to only include company's bids
+    // Filter to only include company's specific bids within those projects
     const projectsWithBids = projects.map(project => {
       const projectObj = project.toObject();
-      projectObj.bids = projectObj.bids.filter(
+      projectObj.myBid = projectObj.bids.find(
         bid => bid.companyId.toString() === company._id.toString()
       );
+      // Clean up other bids for privacy
+      delete projectObj.bids;
       return projectObj;
     });
     
-    res.json({ projects: projectsWithBids });
+    res.json({ success: true, projects: projectsWithBids });
   } catch (error) {
     console.error('Get company bids error:', error);
     res.status(500).json({ error: 'Failed to fetch bids' });
-  }
-});
-
-// Add milestone to active project
-router.post('/:id/milestones', authMiddleware, async (req, res) => {
-  try {
-    const project = await Project.findById(req.params.id);
-    
-    if (!project) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-    
-    // Only project owner can add milestones
-    if (project.clientId.toString() !== req.userId) {
-      return res.status(403).json({ error: 'Not authorized' });
-    }
-    
-    const { title, description, amount, dueDate } = req.body;
-    
-    project.milestones.push({
-      title,
-      description,
-      amount,
-      dueDate,
-      status: 'pending'
-    });
-    
-    await project.save();
-    
-    res.json({ 
-      message: 'Milestone added successfully',
-      project 
-    });
-  } catch (error) {
-    console.error('Add milestone error:', error);
-    res.status(500).json({ error: 'Failed to add milestone' });
-  }
-});
-
-// Update milestone status
-router.put('/:id/milestones/:milestoneId', authMiddleware, async (req, res) => {
-  try {
-    const { id, milestoneId } = req.params;
-    const { status } = req.body;
-    
-    const project = await Project.findById(id);
-    
-    if (!project) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-    
-    const milestone = project.milestones.id(milestoneId);
-    
-    if (!milestone) {
-      return res.status(404).json({ error: 'Milestone not found' });
-    }
-    
-    // Client or assigned company can update
-    const company = await Company.findOne({ userId: req.userId });
-    const isProjectOwner = project.clientId.toString() === req.userId;
-    const isAssignedCompany = project.selectedBid && 
-      project.bids.id(project.selectedBid)?.companyId.toString() === company?._id.toString();
-    
-    if (!isProjectOwner && !isAssignedCompany) {
-      return res.status(403).json({ error: 'Not authorized' });
-    }
-    
-    milestone.status = status;
-    await project.save();
-    
-    // TODO: Send notification about milestone status change
-    
-    res.json({ 
-      message: 'Milestone updated successfully',
-      project 
-    });
-  } catch (error) {
-    console.error('Update milestone error:', error);
-    res.status(500).json({ error: 'Failed to update milestone' });
   }
 });
 

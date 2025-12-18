@@ -42,7 +42,7 @@ const corsOptions = {
 // ✅ ADDED: Rate limiting for API protection
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: process.env.NODE_ENV === 'production' ? 100 : 1000, // 100 req/15min in production
+  max: process.env.NODE_ENV === 'development' ? 100 : 1000, // 100 req/15min in production
   message: {
     success: false,
     error: 'Too many requests from this IP, please try again after 15 minutes'

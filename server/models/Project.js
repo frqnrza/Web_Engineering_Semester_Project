@@ -150,7 +150,7 @@ projectSchema.pre('save', function(next) {
   if (this.isNew && this.status === 'posted' && !this.expiresAt) {
     this.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
   }
-  //next();
+  next(); // ✅ FIXED: Uncommented to prevent hanging
 });
 
 module.exports = mongoose.model('Project', projectSchema);

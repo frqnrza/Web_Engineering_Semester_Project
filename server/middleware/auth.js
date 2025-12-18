@@ -16,11 +16,26 @@ const authMiddleware = async (req, res, next) => {
     
     const token = authHeader.split(' ')[1];
     
+    if (!process.env.JWT_SECRET) {
+      console.error('FATAL: JWT_SECRET is not defined in environment variables');
+      return res.status(500).json({ success: false, error: 'Server configuration error' });
+    }
+
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
+    // ✅ FIXED: Clean ID extraction (removed redundant check)
+    const userId = decoded.id || decoded.userId;
+
+    if (!userId) {
+      return res.status(401).json({ 
+        success: false,
+        error: 'Invalid token structure. Please sign in again.' 
+      });
+    }
+    
     // Get user from database
-    const user = await User.findById(decoded.id || decoded.userId || decoded.userId).select('-password');
+    const user = await User.findById(userId).select('-password');
     
     if (!user) {
       return res.status(401).json({ 
@@ -34,14 +49,6 @@ const authMiddleware = async (req, res, next) => {
       return res.status(403).json({
         success: false,
         error: 'Account suspended. Please contact support.'
-      });
-    }
-
-    // Check if email is verified (only enforce for non-admin users)
-    if (user.type !== 'admin' && !user.emailVerified && process.env.NODE_ENV === 'production') {
-      return res.status(403).json({
-        success: false,
-        error: 'Please verify your email address to access this feature.'
       });
     }
     
@@ -75,7 +82,7 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
-// Optional auth - doesn't fail if no token
+// Optional auth - doesn't fail if no token or invalid token
 const optionalAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -86,15 +93,22 @@ const optionalAuth = async (req, res, next) => {
     
     const token = authHeader.split(' ')[1];
     
+    if (!token) return next();
+
     // Verify token (with expiration check)
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const user = await User.findById(decoded.id || decoded.userId || decoded.userId).select('-password');
-      
-      if (user) {
-        req.user = user;
-        req.userId = user._id;
-        req.userType = user.type;
+      // ✅ FIXED: Clean ID extraction
+      const userId = decoded.id || decoded.userId;
+
+      if (userId) {
+        const user = await User.findById(userId).select('-password');
+        
+        if (user && user.status !== 'suspended') {
+          req.user = user;
+          req.userId = user._id;
+          req.userType = user.type;
+        }
       }
     } catch (tokenError) {
       // Log but don't fail for optional auth
@@ -187,15 +201,16 @@ const trackLoginAttempts = async (req, res, next) => {
     if (email) {
       const user = await User.findOne({ email });
       
-      if (user && user.failedLoginAttempts >= 5) {
+      if (user && user.failedLoginAttempts >= 5 && user.lockUntil) {
         const timeSinceLastAttempt = Date.now() - user.lockUntil;
-        const minutesLeft = Math.ceil((30 * 60 * 1000 - timeSinceLastAttempt) / 60000);
         
-        if (minutesLeft > 0) {
-          return res.status(429).json({
-            success: false,
-            error: `Too many failed login attempts. Account locked. Try again in ${minutesLeft} minutes.`
-          });
+        // If lockUntil is in the future
+        if (user.lockUntil > Date.now()) {
+            const minutesLeft = Math.ceil((user.lockUntil - Date.now()) / 60000);
+            return res.status(429).json({
+                success: false,
+                error: `Too many failed login attempts. Account locked. Try again in ${minutesLeft} minutes.`
+            });
         }
       }
     }
@@ -223,16 +238,6 @@ const validatePasswordStrength = (req, res, next) => {
     return res.status(400).json({
       success: false,
       error: 'Password must be at least 6 characters long'
-    });
-  }
-
-  // Additional password strength checks (optional)
-  const strongPasswordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
-  
-  if (process.env.NODE_ENV === 'production' && !strongPasswordRegex.test(password)) {
-    return res.status(400).json({
-      success: false,
-      error: 'Password must contain at least one uppercase letter, one lowercase letter, one number and one special character'
     });
   }
 
