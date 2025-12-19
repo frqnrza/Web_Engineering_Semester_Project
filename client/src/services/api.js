@@ -487,38 +487,38 @@ export const bidAPI = {
     console.log('📤 Submitting bid for project:', projectId);
     
     try {
-      const data = await fetchWithAuth(`/projects/${projectId}/bids`, {
+      const data = await fetchWithAuth(`/bids`, {
         method: 'POST',
-        body: JSON.stringify(bidData)
+        body: JSON.stringify({
+          ...bidData,
+          projectId: projectId,
+          // Map timeline to proposedTimeline for your model
+          timeline: bidData.proposedTimeline || bidData.timeline
+        })
       });
       
       if (data) {
-        console.log('✅ Bid submitted via backend');
+        console.log('✅ Bid submitted via backend:', data);
         return data;
       }
       
-      console.log('🔄 Backend not available, using mock');
-      return this._mockSubmit(projectId, bidData);
+      // ... rest of your code ...
     } catch (error) {
-      console.log('🔄 Error submitting bid:', error.message);
-      return this._mockSubmit(projectId, bidData);
+      console.error('❌ Bid submission error:', error);
+      throw error;
     }
   },
 
   // Mock submit bid - FIXED
   _mockSubmit(projectId, bidData) {
+    console.log('🔄 Mock submitting bid for project:', projectId);
+    
     const currentUser = authAPI.getCachedUser();
     if (!currentUser) {
-      throw new Error('Not authenticated');
+      throw new Error('Not authenticated. Please sign in.');
     }
     
-    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
-    const projectIndex = projects.findIndex(p => p._id === projectId);
-    
-    if (projectIndex === -1) {
-      throw new Error('Project not found');
-    }
-    
+    // For mock mode, just simulate success without saving to localStorage
     const newBid = {
       _id: Date.now().toString(),
       ...bidData,
@@ -530,21 +530,15 @@ export const bidAPI = {
       updatedAt: new Date().toISOString()
     };
     
-    if (!projects[projectIndex].bids) {
-      projects[projectIndex].bids = [];
-    }
+    console.log('✅ Mock bid created (not saved to localStorage):', newBid);
     
-    projects[projectIndex].bids.push(newBid);
-    projects[projectIndex].updatedAt = new Date().toISOString();
-    
-    localStorage.setItem('projects', JSON.stringify(projects));
-    
-    console.log('✅ Mock bid created:', newBid._id);
+    // Don't actually save to localStorage for real projects
+    // Just return success response
     
     return {
       success: true,
       bid: newBid,
-      message: 'Bid submitted successfully'
+      message: 'Bid submitted successfully (mock mode)'
     };
   },
 
@@ -911,8 +905,17 @@ export const projectAPI = {
   async getAll(filters = {}) {
     console.log('📋 Fetching projects with filters:', filters);
     try {
-      const queryParams = new URLSearchParams(filters).toString();
-      const data = await fetchWithAuth(`/projects${queryParams ? `?${queryParams}` : ''}`);
+      const queryParams = new URLSearchParams();
+      // const queryParams = new URLSearchParams(filters).toString();
+
+      Object.keys(filters).forEach(key => {
+        if (filters[key] !== undefined && filters[key] !== null) {
+          queryParams.append(key, filters[key]);
+        }
+      });
+
+      const data = await fetchWithAuth(`/projects${queryParams.toString() ? `?${queryParams.toString()}` : ''}`);
+      // const data = await fetchWithAuth(`/projects${queryParams ? `?${queryParams}` : ''}`);
       
       if (data) {
         console.log(`✅ Found ${data.projects?.length || 0} projects from backend`);

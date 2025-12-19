@@ -33,6 +33,19 @@ import BidModal from "./BidModal";
 import PropTypes from "prop-types";
 
 export function DashboardPage({ onNavigate, userType = 'client', currentUser }) {
+  console.log('DashboardPage userType:', userType);
+  console.log('DashboardPage currentUser:', currentUser);
+  
+  const actualUserType = currentUser?.type || currentUser?.userType || userType;
+  
+  // Debug logs
+  console.log('=== DASHBOARD DEBUG ===');
+  console.log('Received userType prop:', userType);
+  console.log('Received currentUser:', currentUser);
+  console.log('Actual userType to use:', actualUserType);
+  
+  // Update userType with correct value
+  userType = actualUserType;
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState("overview");
   const [loading, setLoading] = useState(false);

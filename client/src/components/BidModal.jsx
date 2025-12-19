@@ -326,7 +326,7 @@ const BidModal = ({
       const bidPayload = {
         amount: parseFloat(bidData.amount),
         proposal: bidData.proposal,
-        timeline: {
+        timeline: { // Changed from proposedTimeline to timeline
           value: bidData.timelineValue,
           unit: bidData.timelineUnit
         },
@@ -337,37 +337,57 @@ const BidModal = ({
         techStack: bidData.techStack,
         teamStructure: bidData.teamStructure,
         assumptions: bidData.assumptions,
-        paymentSchedule: {
-          type: bidData.paymentSchedule
-        },
+        paymentSchedule: bidData.paymentSchedule,
         escrowRequired: bidData.escrowRequired,
         executiveSummary: bidData.executiveSummary,
         methodology: bidData.methodology,
         attachments: attachments
       };
       
+      console.log('📤 Submitting to real backend...');
+      
+      let response;
       if (isEdit && existingBid) {
-        await bidAPI.updateBid(project._id, existingBid._id, bidPayload);
-        toast({
-          title: 'Bid Updated',
-          description: 'Your bid has been updated successfully',
-        });
+        response = await bidAPI.update(project._id, existingBid._id, bidPayload);
       } else {
-        await bidAPI.submitBid(project._id, bidPayload);
-        toast({
-          title: 'Bid Submitted',
-          description: 'Your bid has been submitted successfully',
-        });
+        response = await bidAPI.submit(project._id, bidPayload);
       }
       
-      onBidSubmit?.();
-      onClose();
+      console.log('📦 Backend response:', response);
+      
+      if (response && response.success) {
+        toast({
+          title: isEdit ? 'Bid Updated' : 'Bid Submitted',
+          description: response.message || 'Your bid has been processed successfully',
+        });
+        
+        // Call the callback to refresh data
+        if (onBidSubmit) {
+          onBidSubmit(response);
+        }
+        
+        onClose();
+      } else {
+        throw new Error(response?.message || 'Failed to submit bid');
+      }
       
     } catch (error) {
       console.error('Bid submission error:', error);
+      
+      // Check for specific error messages
+      let errorMessage = error.message;
+      
+      if (errorMessage.includes('Project not found')) {
+        errorMessage = 'The project was not found. It may have been removed.';
+      } else if (errorMessage.includes('Not authenticated')) {
+        errorMessage = 'Please sign in to submit a bid.';
+      } else if (errorMessage.includes('network')) {
+        errorMessage = 'Network error. Please check your connection and try again.';
+      }
+      
       toast({
         title: 'Submission Failed',
-        description: error.response?.data?.error || 'Failed to submit bid',
+        description: errorMessage,
         variant: 'destructive'
       });
     } finally {
