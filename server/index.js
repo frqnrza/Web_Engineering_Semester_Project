@@ -19,40 +19,30 @@ if (process.env.ENABLE_COMPRESSION === 'true') {
   app.use(compression());
 }
 
-// ✅ IMPROVED: Production CORS configuration
+// âœ… FIXED: Proper CORS configuration for development
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
   ? process.env.ALLOWED_ORIGINS.split(',') 
-  : ['http://localhost:5173'];
+  : ['http://localhost:5173', 'http://localhost:3000']; // Add default for dev
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+    // âœ… CRITICAL: Allow requests with no origin (Postman, mobile apps)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
+      console.log(`❌ CORS blocked origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  exposedHeaders: ['Content-Length', 'X-Total-Count']
+  exposedHeaders: ['Content-Length', 'X-Total-Count'],
+  preflightContinue: false, // âœ… Added
+  optionsSuccessStatus: 204 // âœ… Added for legacy browsers
 };
-
-// ✅ ADDED: Rate limiting for API protection
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: process.env.NODE_ENV === 'development' ? 100 : 1000, // 100 req/15min in production
-  message: {
-    success: false,
-    error: 'Too many requests from this IP, please try again after 15 minutes'
-  },
-  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
-});
-
-// Apply rate limiting to API routes
-app.use('/api/', apiLimiter);
 
 // Middleware
 app.use(cors(corsOptions));
@@ -92,13 +82,16 @@ app.use('/api/payments', require('./routes/payments'));
 app.use('/api/upload', require('./routes/upload'));
 app.use('/api/verification', require('./routes/verification')); 
 app.use('/api/notifications', notificationRoutes);
-app.use('/api/chatbot', require('./routes/chatbot'));
+// app.use('/api/chatbot', require('./routes/chatbot'));
+app.use('/api/users', require('./routes/users'));        // âœ… NEW
+app.use('/api/bids', require('./routes/bids'));          // âœ… NEW
+app.use('/api/company-setup', require('./routes/company-setup'));
 app.use(helmetConfig);
 
 // ✅ REMOVED: /api/translate route (using static i18n)
 // app.use('/api/translate', require('./routes/translate'));
 
-// ✅ IMPROVED: Health check with detailed DB status
+// âœ… MOVED: Health check BEFORE rate limiter
 app.get('/api/health', (req, res) => {
   const dbStatus = mongoose.connection.readyState;
   const statusText = {
@@ -117,18 +110,23 @@ app.get('/api/health', (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     database: {
       status: statusText,
-      connection: dbStatus,
-      host: mongoose.connection.host || 'unknown',
-      name: mongoose.connection.name || 'unknown'
-    },
-    system: {
-      uptime: process.uptime(),
-      memory: process.memoryUsage(),
-      nodeVersion: process.version
-    },
-    version: '1.0.0'
+      connection: dbStatus
+    }
   });
 });
+
+// âœ… Rate limiting AFTER health check
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: process.env.NODE_ENV === 'development' ? 1000 : 100, // âœ… Increased for dev
+  skip: (req) => req.path === '/api/health', // âœ… Skip health checks
+  message: {
+    success: false,
+    error: 'Too many requests, please try again later'
+  }
+});
+
+app.use('/api/', apiLimiter);
 
 // ✅ ADDED: API version endpoint
 app.get('/api/v1', (req, res) => {

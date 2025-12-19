@@ -1,5 +1,48 @@
 const mongoose = require('mongoose');
 
+const bidSchema = new mongoose.Schema({
+  companyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company',
+    required: true
+  },
+  amount: {
+    type: Number,
+    required: true,
+    min: 0
+  },
+  timeline: String,
+  proposal: {
+    type: String,
+    required: true,
+    minlength: 50
+  },
+  attachments: [{
+    url: String,
+    publicId: String,
+    originalName: String
+  }],
+  status: {
+    type: String,
+    enum: ['pending', 'accepted', 'rejected', 'withdrawn'],
+    default: 'pending'
+  },
+  milestones: [{
+    title: String,
+    amount: Number,
+    dueDate: Date,
+    description: String
+  }],
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
 const projectSchema = new mongoose.Schema({
   clientId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -82,36 +125,19 @@ const projectSchema = new mongoose.Schema({
     default: 'draft'
   },
   
-  bids: [{
-    companyId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Company'
-    },
-    amount: Number,
-    timeline: String,
-    proposal: String,
-    
-    // ✅ ADDED: Bid attachments (proposals, documents)
-    attachments: [{
-      url: String,
-      publicId: String,
-      originalName: String
-    }],
-    
-    status: {
-      type: String,
-      enum: ['pending', 'accepted', 'rejected'],
-      default: 'pending'
-    },
-    createdAt: {
-      type: Date,
-      default: Date.now
-    }
-  }],
+  // ✅ UPDATED: Enhanced bids array with separate schema
+  bids: [bidSchema],
   
-  // ✅ ADDED: Selected bid tracking
+  // ✅ UPDATED: Selected bid tracking with reference to bid
   selectedBid: {
-    type: mongoose.Schema.Types.ObjectId
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'bidSchema'
+  },
+  
+  // ✅ UPDATED: Selected company tracking
+  selectedCompany: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Company'
   },
   
   // ✅ ADDED: Project milestones
@@ -134,23 +160,107 @@ const projectSchema = new mongoose.Schema({
   },
   
   // ✅ ADDED: Expiry date (30 days from posting)
-  expiresAt: Date
+  expiresAt: Date,
+  
+  // ✅ ADDED: Auto-expire old projects
+  autoExpireAt: {
+    type: Date,
+    default: () => new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+  }
 }, {
   timestamps: true  // ✅ CHANGED: Use Mongoose timestamps
 });
 
-// ✅ ADDED: Index for search
+// ✅ UPDATED: Index for better query performance
 projectSchema.index({ title: 'text', description: 'text' });
 projectSchema.index({ status: 1, createdAt: -1 });
 projectSchema.index({ category: 1, status: 1 });
 projectSchema.index({ clientId: 1, status: 1 });
+projectSchema.index({ 'bids.companyId': 1, 'bids.status': 1 });
+projectSchema.index({ invitedCompanies: 1, status: 1 });
+projectSchema.index({ expiresAt: 1 });
 
 // ✅ ADDED: Auto-set expiry date before saving
 projectSchema.pre('save', function(next) {
   if (this.isNew && this.status === 'posted' && !this.expiresAt) {
     this.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
   }
-  next(); // ✅ FIXED: Uncommented to prevent hanging
+  next();
 });
+
+// ✅ ADDED: Method to check if company is invited
+projectSchema.methods.isCompanyInvited = function(companyId) {
+  if (!this.isInviteOnly) return true;
+  return this.invitedCompanies.some(id => id.toString() === companyId.toString());
+};
+
+// ✅ ADDED: Method to add a bid
+projectSchema.methods.addBid = function(bidData) {
+  const bid = {
+    ...bidData,
+    status: 'pending',
+    createdAt: new Date(),
+    updatedAt: new Date()
+  };
+  this.bids.push(bid);
+  
+  // Update project status to bidding if first bid
+  if (this.bids.length === 1 && this.status === 'posted') {
+    this.status = 'bidding';
+  }
+  
+  return this.bids[this.bids.length - 1]; // Return the new bid
+};
+
+// ✅ ADDED: Method to accept a bid
+projectSchema.methods.acceptBid = function(bidId) {
+  const bidIndex = this.bids.findIndex(b => b._id.toString() === bidId.toString());
+  if (bidIndex === -1) throw new Error('Bid not found');
+  
+  // Update all bids status
+  this.bids.forEach(bid => {
+    if (bid._id.toString() === bidId.toString()) {
+      bid.status = 'accepted';
+    } else {
+      bid.status = 'rejected';
+    }
+  });
+  
+  this.selectedBid = bidId;
+  this.selectedCompany = this.bids[bidIndex].companyId;
+  this.status = 'active';
+  
+  return this.bids[bidIndex];
+};
+
+// ✅ ADDED: Method to reject a bid
+projectSchema.methods.rejectBid = function(bidId) {
+  const bidIndex = this.bids.findIndex(b => b._id.toString() === bidId.toString());
+  if (bidIndex === -1) throw new Error('Bid not found');
+  
+  this.bids[bidIndex].status = 'rejected';
+  this.bids[bidIndex].updatedAt = new Date();
+  
+  return this.bids[bidIndex];
+};
+
+// ✅ ADDED: Method to withdraw a bid
+projectSchema.methods.withdrawBid = function(bidId, companyId) {
+  const bidIndex = this.bids.findIndex(b => 
+    b._id.toString() === bidId.toString() && 
+    b.companyId.toString() === companyId.toString()
+  );
+  if (bidIndex === -1) throw new Error('Bid not found or unauthorized');
+  
+  this.bids[bidIndex].status = 'withdrawn';
+  this.bids[bidIndex].updatedAt = new Date();
+  
+  return this.bids[bidIndex];
+};
+
+// ✅ ADDED: Method to get company's bid
+projectSchema.methods.getCompanyBid = function(companyId) {
+  return this.bids.find(b => b.companyId.toString() === companyId.toString());
+};
 
 module.exports = mongoose.model('Project', projectSchema);

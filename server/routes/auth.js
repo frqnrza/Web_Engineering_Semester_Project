@@ -276,9 +276,11 @@ router.post('/login',
       if (!errors.isEmpty()) return res.status(400).json({ success: false, error: errors.array()[0].msg });
 
       const { email, password } = req.body;
+      console.log('🔐 Login attempt for:', email);
 
       const user = await User.findOne({ email });
       if (!user) {
+        console.log('❌ User not found:', email);
         return res.status(401).json({ success: false, error: 'Invalid email or password.' });
       }
 
@@ -298,6 +300,7 @@ router.post('/login',
       }
 
       if (!isValidPassword) {
+        console.log('❌ Invalid password for:', email);
         if (user.incLoginAttempts) await user.incLoginAttempts();
         return res.status(401).json({ success: false, error: 'Invalid email or password.' });
       }
@@ -306,6 +309,8 @@ router.post('/login',
 
       // Generate Tokens
       const { accessToken, refreshToken } = generateTokens(user._id, user.type);
+      console.log('✅ Token generated for:', user.email);
+      console.log('🔑 Token payload will contain userId:', user._id);
 
       // Manage Refresh Tokens
       user.refreshTokens = user.refreshTokens || [];
@@ -342,6 +347,7 @@ router.post('/login',
         token: accessToken,
         user: {
           id: user._id,
+          _id: user._id,
           email: user.email,
           name: user.name,
           type: user.type,
@@ -354,6 +360,7 @@ router.post('/login',
           createdAt: user.createdAt
         }
       });
+      console.log('✅ Login response sent successfully');
     } catch (error) {
       console.error('Login error:', error);
       res.status(500).json({ success: false, error: 'Login failed.' });

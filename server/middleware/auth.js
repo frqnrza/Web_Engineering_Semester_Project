@@ -2,12 +2,17 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
 // Verify JWT access token
+// In authMiddleware function, around line 15-20
 const authMiddleware = async (req, res, next) => {
   try {
-    // Get token from header
     const authHeader = req.headers.authorization;
     
+    console.log('🔍 Auth check - Headers:', {
+      authorization: authHeader ? authHeader.substring(0, 30) + '...' : 'MISSING'
+    }); // âœ… Debug log
+
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('❌ No Bearer token in Authorization header');
       return res.status(401).json({ 
         success: false,
         error: 'Authentication required. Please sign in.' 
@@ -15,50 +20,57 @@ const authMiddleware = async (req, res, next) => {
     }
     
     const token = authHeader.split(' ')[1];
-    
+    console.log('🔑 Token extracted:', token.substring(0, 20) + '...'); // âœ… Debug
+
+    // âœ… Verify JWT_SECRET exists
     if (!process.env.JWT_SECRET) {
-      console.error('FATAL: JWT_SECRET is not defined in environment variables');
-      return res.status(500).json({ success: false, error: 'Server configuration error' });
+      console.error('❌ FATAL: JWT_SECRET not defined in .env');
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Server configuration error' 
+      });
     }
 
-    // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    
-    // ✅ FIXED: Clean ID extraction (removed redundant check)
-    const userId = decoded.id || decoded.userId;
+    console.log('✅ Token decoded:', decoded); // âœ… Debug
+
+    // âœ… Extract user ID (handles both 'id' and 'userId' in token)
+    const userId = decoded.userId || decoded.id;
 
     if (!userId) {
+      console.log('❌ No userId in token payload');
       return res.status(401).json({ 
         success: false,
-        error: 'Invalid token structure. Please sign in again.' 
+        error: 'Invalid token. Please sign in again.' 
       });
     }
     
-    // Get user from database
     const user = await User.findById(userId).select('-password');
     
     if (!user) {
+      console.log('❌ User not found:', userId);
       return res.status(401).json({ 
         success: false,
         error: 'User not found. Please sign in again.' 
       });
     }
 
-    // Check if user is active
     if (user.status === 'suspended') {
       return res.status(403).json({
         success: false,
-        error: 'Account suspended. Please contact support.'
+        error: 'Account suspended. Contact support.'
       });
     }
     
-    // Attach user to request
+    console.log('✅ Auth successful for user:', user.email);
+
     req.user = user;
     req.userId = user._id;
     req.userType = user.type;
     
     next();
   } catch (error) {
+    console.error('❌ Auth middleware error:', error.message);
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({ 
         success: false,
@@ -70,14 +82,13 @@ const authMiddleware = async (req, res, next) => {
     if (error.name === 'JsonWebTokenError') {
       return res.status(401).json({ 
         success: false,
-        error: 'Invalid authentication token. Please sign in again.' 
+        error: 'Invalid token. Please sign in again.' 
       });
     }
     
-    console.error('Auth middleware error:', error);
     return res.status(500).json({ 
       success: false,
-      error: 'Authentication failed. Please try again.' 
+      error: 'Authentication failed.' 
     });
   }
 };

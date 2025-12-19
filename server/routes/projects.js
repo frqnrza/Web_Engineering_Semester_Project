@@ -286,92 +286,126 @@ router.delete('/:id', authMiddleware, async (req, res) => {
 // ==========================================
 // SUBMIT BID (Company Only)
 // ==========================================
-router.post('/:id/bids', authMiddleware, requireRole('company'), async (req, res) => {
-  try {
-    const project = await Project.findById(req.params.id);
-    
-    if (!project) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-
-    // Check if project is open for bidding
-    if (project.status !== 'posted' && project.status !== 'bidding') {
-      return res.status(400).json({ error: 'Project is not accepting bids' });
-    }
-
-    // Get company info
-    const company = await Company.findOne({ userId: req.userId });
-    if (!company) {
-      return res.status(404).json({ error: 'Company profile not found. Please complete your profile first.' });
-    }
-
-    // Check if company already bid
-    const existingBid = project.bids.find(bid => 
-      bid.companyId.toString() === company._id.toString()
-    );
-    
-    if (existingBid) {
-      return res.status(400).json({ error: 'You have already submitted a bid for this project' });
-    }
-
-    // Validate bid data
-    const { amount, timeline, proposal, milestones, attachments } = req.body;
-    
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ error: 'Invalid bid amount' });
-    }
-    
-    if (!proposal || proposal.trim().length < 50) {
-      return res.status(400).json({ 
-        error: 'Proposal must be at least 50 characters' 
-      });
-    }
-
-    // ✅ FIXED: Schema consistency - removed companyId_user, using explicit fields from Schema
-    const bid = {
-      companyId: company._id,
-      amount: Number(amount),
-      timeline: timeline || (project.timeline?.value + ' ' + project.timeline?.unit),
-      proposal: proposal,
-      milestones: milestones || [],
-      attachments: attachments || [],
-      status: 'pending',
-      createdAt: new Date()
-    };
-
-    project.bids.push(bid);
-    
-    // Update project status to bidding if it was just posted
-    if (project.status === 'posted') {
-      project.status = 'bidding';
-    }
-    
-    await project.save();
-
-    // Create notification for client
+router.post('/:id/bids', 
+  authMiddleware, 
+  requireRole('company'),
+  [
+    body('amount').isNumeric().withMessage('Amount must be a number'),
+    body('proposal').isLength({ min: 50 }).withMessage('Proposal must be at least 50 characters')
+  ],
+  async (req, res) => {
     try {
-      await Notification.create({
-        userId: project.clientId,
-        type: 'new_bid',
-        title: 'New Bid Received',
-        message: `${company.name} submitted a bid on your project "${project.title}"`,
-        data: { projectId: project._id, bidId: bid._id },
-        read: false
-      });
-    } catch (notifError) {
-      console.warn('Failed to create notification:', notifError.message);
-    }
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ error: errors.array()[0].msg });
+      }
+      
+      const project = await Project.findById(req.params.id);
+      
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found' });
+      }
 
-    res.status(201).json({
-      success: true,
-      bid,
-      message: 'Bid submitted successfully'
-    });
-  } catch (error) {
-    console.error('Submit bid error:', error);
-    res.status(500).json({ error: 'Failed to submit bid' });
+      // Check if project is open for bidding
+      if (!['posted', 'bidding'].includes(project.status)) {
+        return res.status(400).json({ error: 'Project is not accepting bids' });
+      }
+
+      // Check if project has expired
+      if (project.expiresAt && new Date(project.expiresAt) < new Date()) {
+        return res.status(400).json({ error: 'Project bidding has expired' });
+      }
+
+      // Get company info
+      const company = await Company.findOne({ userId: req.userId });
+      if (!company) {
+        return res.status(404).json({ error: 'Company profile not found. Please complete your profile first.' });
+      }
+
+      // Check if company is verified (optional enhancement)
+      if (!company.verified) {
+        return res.status(403).json({ error: 'Only verified companies can submit bids' });
+      }
+
+      // Check if company is invited (for invite-only projects)
+      if (project.isInviteOnly && !project.isCompanyInvited(company._id)) {
+        return res.status(403).json({ error: 'You are not invited to bid on this project' });
+      }
+
+      // Check if company already bid
+      const existingBid = project.getCompanyBid(company._id);
+      if (existingBid && !['rejected', 'withdrawn'].includes(existingBid.status)) {
+        return res.status(400).json({ error: 'You have already submitted a bid for this project' });
+      }
+
+      // Validate bid data
+      const { amount, timeline, proposal, milestones, attachments } = req.body;
+      
+      if (amount <= 0) {
+        return res.status(400).json({ error: 'Invalid bid amount' });
+      }
+      
+      // Check if bid amount is within project budget range
+      if (project.budget.min && amount < project.budget.min) {
+        return res.status(400).json({ error: 'Bid amount is below project minimum budget' });
+      }
+      
+      if (project.budget.max && amount > project.budget.max) {
+        return res.status(400).json({ error: 'Bid amount exceeds project maximum budget' });
+      }
+
+      // Create bid
+      const bidData = {
+        companyId: company._id,
+        amount: Number(amount),
+        timeline: timeline || `${project.timeline?.value} ${project.timeline?.unit}`,
+        proposal: proposal.trim(),
+        milestones: milestones || [],
+        attachments: attachments || []
+      };
+
+      // Add bid to project using schema method
+      const newBid = project.addBid(bidData);
+      await project.save();
+
+      // Create notification for client
+      try {
+        const notification = await Notification.create({
+          userId: project.clientId,
+          type: 'new_bid',
+          title: 'New Bid Received',
+          message: `${company.name} submitted a bid for ₹${amount} on your project "${project.title}"`,
+          data: { 
+            projectId: project._id, 
+            projectTitle: project.title,
+            bidId: newBid._id,
+            companyId: company._id,
+            companyName: company.name,
+            amount: amount
+          },
+          read: false,
+          priority: 'medium'
+        });
+
+        // Emit real-time notification if Socket.io is available
+        if (req.io) {
+          req.io.to(project.clientId.toString()).emit('new_notification', notification);
+        }
+      } catch (notifError) {
+        console.warn('Failed to create notification:', notifError.message);
+      }
+
+      res.status(201).json({
+        success: true,
+        bid: newBid,
+        message: 'Bid submitted successfully'
+      });
+    } catch (error) {
+      console.error('Submit bid error:', error);
+      res.status(500).json({ error: 'Failed to submit bid' });
+    }
   }
-});
+);
 
 // ==========================================
 // GET PROJECT BIDS
@@ -381,21 +415,53 @@ router.get('/:id/bids', authMiddleware, async (req, res) => {
     const project = await Project.findById(req.params.id)
       .populate({
         path: 'bids.companyId',
-        select: 'name logo verified rating reviewCount'
+        select: 'name logo verified rating reviewCount services tagline location'
       });
     
     if (!project) {
       return res.status(404).json({ error: 'Project not found' });
     }
 
-    // Check if user is project owner or admin
-    if (project.clientId.toString() !== req.userId.toString() && req.userType !== 'admin') {
-      return res.status(403).json({ error: 'Not authorized to view bids' });
+    // Check if user is project owner or admin or bidder
+    const isOwner = project.clientId.toString() === req.userId.toString();
+    const isAdmin = req.userType === 'admin';
+    
+    if (!isOwner && !isAdmin) {
+      // Check if user is one of the bidders
+      const company = await Company.findOne({ userId: req.userId });
+      if (company) {
+        const isBidder = project.bids.some(bid => 
+          bid.companyId.toString() === company._id.toString()
+        );
+        if (!isBidder) {
+          return res.status(403).json({ error: 'Not authorized to view bids' });
+        }
+      } else {
+        return res.status(403).json({ error: 'Not authorized to view bids' });
+      }
     }
+
+    // For non-owners, only show their own bid
+    let bidsToShow = project.bids;
+    if (!isOwner && !isAdmin) {
+      const company = await Company.findOne({ userId: req.userId });
+      bidsToShow = project.bids.filter(bid => 
+        bid.companyId.toString() === company._id.toString()
+      );
+    }
+
+    // Sort bids: pending first, then by amount/createdAt
+    const sortedBids = bidsToShow.sort((a, b) => {
+      if (a.status === 'pending' && b.status !== 'pending') return -1;
+      if (b.status === 'pending' && a.status !== 'pending') return 1;
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
 
     res.json({
       success: true,
-      bids: project.bids
+      bids: sortedBids,
+      projectTitle: project.title,
+      isOwner: isOwner
     });
   } catch (error) {
     console.error('Get bids error:', error);
@@ -404,80 +470,326 @@ router.get('/:id/bids', authMiddleware, async (req, res) => {
 });
 
 // ==========================================
-// ACCEPT/REJECT BID
+// ACCEPT BID (Client Only)
 // ==========================================
-router.put('/:projectId/bids/:bidId', authMiddleware, requireRole('client'), async (req, res) => {
-  try {
-    const { status } = req.body;
-    const project = await Project.findById(req.params.projectId);
-    
-    if (!project) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-
-    // Check if user is project owner
-    if (project.clientId.toString() !== req.userId.toString()) {
-      return res.status(403).json({ error: 'Not authorized' });
-    }
-
-    const bid = project.bids.id(req.params.bidId);
-    if (!bid) {
-      return res.status(404).json({ error: 'Bid not found' });
-    }
-
-    bid.status = status;
-    
-    if (status === 'accepted') {
-      // Reject all other bids
-      project.bids.forEach(b => {
-        if (b._id.toString() !== bid._id.toString()) {
-          b.status = 'rejected';
-        }
-      });
-      
-      project.status = 'active';
-      project.selectedBid = bid._id;
-      // ✅ FIXED: removed selectedCompany as it's not in schema
-      
-      // Auto-create milestones from bid if they exist
-      if (bid.milestones && bid.milestones.length > 0) {
-        project.milestones = bid.milestones.map(m => ({
-          ...m,
-          status: 'pending'
-        }));
-      }
-    }
-
-    await project.save();
-
-    // Create notification for company
+router.post('/:projectId/bids/:bidId/accept', 
+  authMiddleware, 
+  requireRole('client'),
+  async (req, res) => {
     try {
-      // We need to look up the company user to send notification
-      const company = await Company.findById(bid.companyId);
-      if (company) {
+      const project = await Project.findById(req.params.projectId);
+      
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found' });
+      }
+
+      // Check if user is project owner
+      if (project.clientId.toString() !== req.userId.toString()) {
+        return res.status(403).json({ error: 'Not authorized' });
+      }
+
+      // Check if project is still in bidding phase
+      if (!['posted', 'bidding'].includes(project.status)) {
+        return res.status(400).json({ error: 'Cannot accept bid on inactive project' });
+      }
+
+      const bid = project.bids.id(req.params.bidId);
+      if (!bid) {
+        return res.status(404).json({ error: 'Bid not found' });
+      }
+
+      // Accept the bid using schema method
+      const acceptedBid = project.acceptBid(bid._id);
+      await project.save();
+
+      // Get company info for notification
+      const company = await Company.findById(acceptedBid.companyId);
+      
+      // Create notifications
+      try {
+        // Notification for company (bid accepted)
         await Notification.create({
           userId: company.userId,
-          type: 'bid_status',
-          title: `Bid ${status.charAt(0).toUpperCase() + status.slice(1)}`,
-          message: `Your bid on project "${project.title}" has been ${status}`,
-          data: { projectId: project._id, bidId: bid._id },
-          read: false
+          type: 'bid_accepted',
+          title: 'Bid Accepted!',
+          message: `Your bid of ₹${acceptedBid.amount} for project "${project.title}" has been accepted`,
+          data: { 
+            projectId: project._id, 
+            projectTitle: project.title,
+            bidId: acceptedBid._id,
+            amount: acceptedBid.amount
+          },
+          read: false,
+          priority: 'high'
         });
-      }
-    } catch (notifError) {
-      console.warn('Failed to create notification:', notifError.message);
-    }
 
-    res.json({
-      success: true,
-      project,
-      message: `Bid ${status} successfully`
-    });
-  } catch (error) {
-    console.error('Update bid error:', error);
-    res.status(500).json({ error: 'Failed to update bid' });
+        // Notify other bidders
+        const rejectedBids = project.bids.filter(b => b.status === 'rejected');
+        for (const rejectedBid of rejectedBids) {
+          const rejectedCompany = await Company.findById(rejectedBid.companyId);
+          if (rejectedCompany) {
+            await Notification.create({
+              userId: rejectedCompany.userId,
+              type: 'bid_rejected',
+              title: 'Bid Not Selected',
+              message: `Your bid for project "${project.title}" was not selected`,
+              data: { 
+                projectId: project._id, 
+                projectTitle: project.title
+              },
+              read: false,
+              priority: 'low'
+            });
+          }
+        }
+
+        // Emit real-time notifications
+        if (req.io) {
+          req.io.to(company.userId.toString()).emit('bid_accepted', {
+            projectTitle: project.title,
+            bidId: acceptedBid._id
+          });
+        }
+      } catch (notifError) {
+        console.warn('Failed to create notifications:', notifError.message);
+      }
+
+      res.json({
+        success: true,
+        project,
+        message: 'Bid accepted successfully. Project is now active.'
+      });
+    } catch (error) {
+      console.error('Accept bid error:', error);
+      res.status(500).json({ error: 'Failed to accept bid' });
+    }
   }
-});
+);
+
+// ==========================================
+// REJECT BID (Client Only)
+// ==========================================
+router.post('/:projectId/bids/:bidId/reject', 
+  authMiddleware, 
+  requireRole('client'),
+  async (req, res) => {
+    try {
+      const { reason } = req.body;
+      const project = await Project.findById(req.params.projectId);
+      
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found' });
+      }
+
+      // Check if user is project owner
+      if (project.clientId.toString() !== req.userId.toString()) {
+        return res.status(403).json({ error: 'Not authorized' });
+      }
+
+      const bid = project.bids.id(req.params.bidId);
+      if (!bid) {
+        return res.status(404).json({ error: 'Bid not found' });
+      }
+
+      // Reject the bid using schema method
+      const rejectedBid = project.rejectBid(bid._id);
+      await project.save();
+
+      // Create notification for company
+      try {
+        const company = await Company.findById(rejectedBid.companyId);
+        if (company) {
+          const notification = await Notification.create({
+            userId: company.userId,
+            type: 'bid_rejected',
+            title: 'Bid Rejected',
+            message: `Your bid for project "${project.title}" has been rejected${reason ? `: ${reason}` : ''}`,
+            data: { 
+              projectId: project._id, 
+              projectTitle: project.title,
+              bidId: rejectedBid._id,
+              reason: reason || ''
+            },
+            read: false,
+            priority: 'medium'
+          });
+
+          if (req.io) {
+            req.io.to(company.userId.toString()).emit('bid_rejected', notification);
+          }
+        }
+      } catch (notifError) {
+        console.warn('Failed to create notification:', notifError.message);
+      }
+
+      res.json({
+        success: true,
+        project,
+        message: 'Bid rejected successfully'
+      });
+    } catch (error) {
+      console.error('Reject bid error:', error);
+      res.status(500).json({ error: 'Failed to reject bid' });
+    }
+  }
+);
+
+// ==========================================
+// WITHDRAW BID (Company Only)
+// ==========================================
+router.post('/:projectId/bids/:bidId/withdraw', 
+  authMiddleware, 
+  requireRole('company'),
+  async (req, res) => {
+    try {
+      const project = await Project.findById(req.params.projectId);
+      
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found' });
+      }
+
+      // Get company info
+      const company = await Company.findOne({ userId: req.userId });
+      if (!company) {
+        return res.status(404).json({ error: 'Company not found' });
+      }
+
+      const bid = project.bids.id(req.params.bidId);
+      if (!bid) {
+        return res.status(404).json({ error: 'Bid not found' });
+      }
+
+      // Check if bid belongs to company
+      if (bid.companyId.toString() !== company._id.toString()) {
+        return res.status(403).json({ error: 'Not authorized to withdraw this bid' });
+      }
+
+      // Check if bid can be withdrawn
+      if (!['pending', 'accepted'].includes(bid.status)) {
+        return res.status(400).json({ error: 'Cannot withdraw bid in current status' });
+      }
+
+      // Withdraw bid using schema method
+      const withdrawnBid = project.withdrawBid(bid._id, company._id);
+      await project.save();
+
+      // Create notification for client
+      try {
+        await Notification.create({
+          userId: project.clientId,
+          type: 'bid_withdrawn',
+          title: 'Bid Withdrawn',
+          message: `${company.name} withdrew their bid from project "${project.title}"`,
+          data: { 
+            projectId: project._id, 
+            projectTitle: project.title,
+            bidId: withdrawnBid._id,
+            companyName: company.name
+          },
+          read: false,
+          priority: 'medium'
+        });
+
+        if (req.io) {
+          req.io.to(project.clientId.toString()).emit('bid_withdrawn', {
+            projectTitle: project.title,
+            companyName: company.name
+          });
+        }
+      } catch (notifError) {
+        console.warn('Failed to create notification:', notifError.message);
+      }
+
+      res.json({
+        success: true,
+        message: 'Bid withdrawn successfully'
+      });
+    } catch (error) {
+      console.error('Withdraw bid error:', error);
+      res.status(500).json({ error: 'Failed to withdraw bid' });
+    }
+  }
+);
+
+// ==========================================
+// INVITE COMPANY TO BID (Client Only)
+// ==========================================
+router.post('/:id/invite', 
+  authMiddleware, 
+  requireRole('client'),
+  async (req, res) => {
+    try {
+      const { companyId } = req.body;
+      
+      if (!companyId) {
+        return res.status(400).json({ error: 'Company ID is required' });
+      }
+
+      const project = await Project.findById(req.params.id);
+      
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found' });
+      }
+
+      // Check if user is project owner
+      if (project.clientId.toString() !== req.userId.toString()) {
+        return res.status(403).json({ error: 'Not authorized' });
+      }
+
+      // Check if project is invite-only
+      if (!project.isInviteOnly) {
+        return res.status(400).json({ error: 'Project is not invite-only' });
+      }
+
+      // Check if company is already invited
+      if (project.invitedCompanies.includes(companyId)) {
+        return res.status(400).json({ error: 'Company already invited' });
+      }
+
+      // Check if company exists
+      const company = await Company.findById(companyId);
+      if (!company) {
+        return res.status(404).json({ error: 'Company not found' });
+      }
+
+      // Add company to invited list
+      project.invitedCompanies.push(companyId);
+      await project.save();
+
+      // Create notification for company
+      try {
+        const notification = await Notification.create({
+          userId: company.userId,
+          type: 'project_invitation',
+          title: 'Project Invitation',
+          message: `You've been invited to bid on project "${project.title}"`,
+          data: { 
+            projectId: project._id, 
+            projectTitle: project.title,
+            clientId: project.clientId
+          },
+          read: false,
+          priority: 'high'
+        });
+
+        if (req.io) {
+          req.io.to(company.userId.toString()).emit('project_invitation', notification);
+        }
+      } catch (notifError) {
+        console.warn('Failed to create notification:', notifError.message);
+      }
+
+      res.json({
+        success: true,
+        message: `Company invited successfully`,
+        invitedCompanies: project.invitedCompanies
+      });
+    } catch (error) {
+      console.error('Invite company error:', error);
+      res.status(500).json({ error: 'Failed to invite company' });
+    }
+  }
+);
 
 // ==========================================
 // GET USER'S PROJECTS
@@ -537,5 +849,129 @@ router.get('/company/my-bids', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch bids' });
   }
 });
+
+// ==========================================
+// GET COMPANY'S INVITATIONS
+// ==========================================
+router.get('/company/invitations', authMiddleware, requireRole('company'), async (req, res) => {
+  try {
+    const company = await Company.findOne({ userId: req.userId });
+    if (!company) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    // Find projects where company is invited
+    const projects = await Project.find({
+      invitedCompanies: company._id,
+      status: { $in: ['posted', 'bidding'] }
+    })
+    .populate('clientId', 'name email avatar')
+    .select('title description category budget timeline status isInviteOnly')
+    .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      invitations: projects
+    });
+  } catch (error) {
+    console.error('Get invitations error:', error);
+    res.status(500).json({ error: 'Failed to fetch invitations' });
+  }
+});
+
+// ==========================================
+// GET PROJECT CATEGORIES
+// ==========================================
+router.get('/categories', async (req, res) => {
+  try {
+    const categories = await Project.distinct('category');
+    
+    const categoriesWithCounts = await Promise.all(
+      categories.map(async (cat) => ({
+        id: cat,
+        name: cat.charAt(0).toUpperCase() + cat.slice(1),
+        count: await Project.countDocuments({ category: cat })
+      }))
+    );
+
+    res.json({
+      success: true,
+      categories: categoriesWithCounts
+    });
+  } catch (error) {
+    console.error('Get categories error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch categories' });
+  }
+});
+
+// ==========================================
+// GET PROJECT STATS
+// ==========================================
+router.get('/:id/stats', authMiddleware, async (req, res) => {
+  try {
+    const project = await Project.findById(req.params.id);
+    
+    if (!project) {
+      return res.status(404).json({ success: false, error: 'Project not found' });
+    }
+
+    const totalBids = project.bids?.length || 0;
+    const avgBidAmount = totalBids > 0 
+      ? project.bids.reduce((sum, b) => sum + (b.amount || 0), 0) / totalBids 
+      : 0;
+
+    res.json({
+      success: true,
+      stats: {
+        totalBids,
+        pendingBids: project.bids?.filter(b => b.status === 'pending').length || 0,
+        acceptedBids: project.bids?.filter(b => b.status === 'accepted').length || 0,
+        rejectedBids: project.bids?.filter(b => b.status === 'rejected').length || 0,
+        viewCount: project.viewCount || 0,
+        avgBidAmount
+      }
+    });
+  } catch (error) {
+    console.error('Get project stats error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch stats' });
+  }
+});
+
+// ==========================================
+// GET COMPANY'S PROJECTS WITH BIDS
+// ==========================================
+router.get('/company/my-bids', authMiddleware, async (req, res) => {
+  try {
+    if (req.userType !== 'company') {
+      return res.status(403).json({ success: false, error: 'Only companies can access' });
+    }
+
+    const company = await Company.findOne({ userId: req.userId });
+    if (!company) {
+      return res.status(404).json({ success: false, error: 'Company not found' });
+    }
+
+    const projects = await Project.find({ 'bids.companyId': company._id })
+      .populate('clientId', 'name email avatar');
+
+    const projectsWithBids = projects.map(project => {
+      const projectObj = project.toObject();
+      projectObj.myBid = project.bids.find(bid => 
+        bid.companyId.toString() === company._id.toString()
+      );
+      delete projectObj.bids; // Remove all bids, only show company's bid
+      return projectObj;
+    });
+
+    res.json({
+      success: true,
+      projects: projectsWithBids
+    });
+  } catch (error) {
+    console.error('Get company bids error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch projects' });
+  }
+});
+
 
 module.exports = router;
