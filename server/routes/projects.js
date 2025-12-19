@@ -498,6 +498,22 @@ router.post('/:projectId/bids/:bidId/accept',
         return res.status(404).json({ error: 'Bid not found' });
       }
 
+      // ✅ IMPORTANT: If using separate Bid model, update it too
+      let bidDoc = null;
+      if (req.bidModel) { // Assuming you have access to Bid model
+        bidDoc = await req.bidModel.findOneAndUpdate(
+          { 
+            _id: bid._id,
+            project: project._id 
+          },
+          { 
+            status: 'accepted',
+            acceptedAt: new Date()
+          },
+          { new: true }
+        );
+      }
+
       // Accept the bid using schema method
       const acceptedBid = project.acceptBid(bid._id);
       await project.save();
@@ -542,14 +558,6 @@ router.post('/:projectId/bids/:bidId/accept',
             });
           }
         }
-
-        // Emit real-time notifications
-        if (req.io) {
-          req.io.to(company.userId.toString()).emit('bid_accepted', {
-            projectTitle: project.title,
-            bidId: acceptedBid._id
-          });
-        }
       } catch (notifError) {
         console.warn('Failed to create notifications:', notifError.message);
       }
@@ -557,6 +565,7 @@ router.post('/:projectId/bids/:bidId/accept',
       res.json({
         success: true,
         project,
+        bid: bidDoc || acceptedBid, // Return updated bid document
         message: 'Bid accepted successfully. Project is now active.'
       });
     } catch (error) {

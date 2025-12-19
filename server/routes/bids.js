@@ -582,35 +582,56 @@ router.get('/company', authMiddleware, async (req, res) => {
 
     const { status } = req.query;
 
-    // Use your model's static method
-    const bids = await Bid.findByCompany(company._id, { 
-      status: status !== 'all' ? status : undefined 
-    });
+    // Get bids from Bid model (if using separate model)
+    const bids = await Bid.find({ company: company._id })
+      .populate('project', 'title category status')
+      .sort({ submittedAt: -1 });
 
-    // Format response
-    const formattedBids = bids.map(bid => ({
-      ...bid.toObject(),
-      projectId: bid.project?._id || bid.project,
-      projectTitle: bid.project?.title,
-      projectCategory: bid.project?.category,
-      projectStatus: bid.project?.status,
-      clientName: bid.client?.name || 'Unknown Client'
-    }));
+    // ✅ CRITICAL: Verify each bid's status with project data
+    const verifiedBids = await Promise.all(
+      bids.map(async (bid) => {
+        const bidObj = bid.toObject();
+        
+        // Get latest project data
+        const project = await Project.findById(bid.project._id);
+        if (project && project.bids) {
+          const projectBid = project.bids.find(b => 
+            b._id.toString() === bid._id.toString()
+          );
+          if (projectBid && projectBid.status !== bid.status) {
+            // Update bid status to match project
+            bidObj.status = projectBid.status;
+            // Optionally update the Bid document too
+            await Bid.findByIdAndUpdate(bid._id, { status: projectBid.status });
+          }
+        }
+        
+        // Add project info for frontend
+        bidObj.projectId = bid.project._id;
+        bidObj.projectTitle = bid.project.title;
+        bidObj.projectCategory = bid.project.category;
+        bidObj.projectStatus = bid.project.status;
+        
+        return bidObj;
+      })
+    );
 
-    const allBids = await Bid.find({ company: company._id });
-    
+    let filteredBids = verifiedBids;
+    if (status && status !== 'all') {
+      filteredBids = verifiedBids.filter(b => b.status === status);
+    }
+
     res.json({
       success: true,
-      bids: formattedBids,
-      total: formattedBids.length,
+      bids: filteredBids,
+      total: filteredBids.length,
       stats: {
-        draft: allBids.filter(b => b.status === 'draft').length,
-        submitted: allBids.filter(b => b.status === 'submitted').length,
-        under_review: allBids.filter(b => b.status === 'under_review').length,
-        accepted: allBids.filter(b => b.status === 'accepted').length,
-        rejected: allBids.filter(b => b.status === 'rejected').length,
-        withdrawn: allBids.filter(b => b.status === 'withdrawn').length,
-        expired: allBids.filter(b => b.status === 'expired').length
+        pending: verifiedBids.filter(b => b.status === 'pending').length,
+        submitted: verifiedBids.filter(b => b.status === 'submitted').length,
+        under_review: verifiedBids.filter(b => b.status === 'under_review').length,
+        accepted: verifiedBids.filter(b => b.status === 'accepted').length,
+        rejected: verifiedBids.filter(b => b.status === 'rejected').length,
+        withdrawn: verifiedBids.filter(b => b.status === 'withdrawn').length
       }
     });
   } catch (error) {

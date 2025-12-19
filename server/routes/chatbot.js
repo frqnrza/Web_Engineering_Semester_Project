@@ -4,7 +4,7 @@ const router = express.Router();
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // Initialize Gemini
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || 'your-api-key-here');
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || 'AIzaSyBrdmtwIRQuPSNHKULBehvgg8V-ZEzmz-A');
 
 // System prompt for TechConnect
 const SYSTEM_PROMPT = `You are TechConnect AI, an assistant for a Pakistani tech marketplace platform.
