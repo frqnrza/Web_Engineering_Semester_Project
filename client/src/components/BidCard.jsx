@@ -121,7 +121,7 @@ const BidCard = ({
     
     setIsAccepting(true);
     try {
-      await bidAPI.acceptBid(project._id, bid._id);
+      await bidAPI.accept(project._id, bid._id);
       toast({
         title: 'Bid Accepted',
         description: 'The bid has been accepted successfully',
@@ -141,10 +141,10 @@ const BidCard = ({
   // Handle bid rejection
   const handleRejectBid = async () => {
     const reason = prompt('Please provide a reason for rejection (optional):');
-    
+    if (reason === null) return; // User cancelled
     setIsRejecting(true);
     try {
-      await bidAPI.rejectBid(project._id, bid._id, { reason });
+      await bidAPI.reject(project._id, bid._id, { reason });
       toast({
         title: 'Bid Rejected',
         description: 'The bid has been rejected',

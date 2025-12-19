@@ -798,7 +798,30 @@ export const bidAPI = {
       
       if (data) {
         console.log(`✅ Found ${data.bids?.length || 0} company bids from backend`);
-        return data;
+        
+        // ✅ ADDED: Verify bid status with project data for accuracy
+        const verifiedBids = await Promise.all(
+          (data.bids || []).map(async (bid) => {
+            try {
+              // Fetch latest project data to verify bid status
+              const projectData = await projectAPI.getById(bid.projectId);
+              if (projectData && projectData.project) {
+                const projectBid = projectData.project.bids?.find(
+                  b => b._id === bid._id
+                );
+                if (projectBid && projectBid.status !== bid.status) {
+                  console.log(`🔄 Updating bid ${bid._id} status from ${bid.status} to ${projectBid.status}`);
+                  return { ...bid, status: projectBid.status };
+                }
+              }
+            } catch (error) {
+              console.error('Error verifying bid status:', error);
+            }
+            return bid;
+          })
+        );
+        
+        return { ...data, bids: verifiedBids };
       }
       
       console.log('🔄 Backend not available, using mock');
