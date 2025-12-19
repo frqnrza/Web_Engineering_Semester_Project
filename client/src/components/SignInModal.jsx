@@ -30,46 +30,50 @@ export function SignInModal({ open, onClose, onSignIn, onSwitchToSignUp }) {
     onClose();
   };
 
-  // FIXED: Call API with individual parameters, not object
+  // ✅ FIXED: Use email and password state variables, not formData
   const handleSignIn = async (e) => {
     e.preventDefault();
-    
-    if (!email || !password) {
-      setError("Please fill in all fields");
-      return;
-    }
-
+    setError('');
     setIsLoading(true);
-    setError("");
 
     try {
-      console.log('🔐 Attempting login...');
-      // FIXED: Pass individual parameters
+      console.log('🔐 Attempting sign in:', email);
+    
+      // ✅ FIXED: Pass email and password directly
       const result = await authAPI.login(email, password);
-      
+    
       console.log('✅ Login successful:', result);
+    
+      if (result.success) {
+        // ✅ CRITICAL: Ensure token and user are saved
+        if (result.token) {
+          console.log('💾 Saving token:', result.token.substring(0, 20) + '...');
+          localStorage.setItem('authToken', result.token);
+        } else {
+          console.error('❌ No token in login response!');
+          throw new Error('No authentication token received');
+        }
       
-      setEmail("");
-      setPassword("");
+        if (result.user) {
+          console.log('💾 Saving user:', result.user.email);
+          localStorage.setItem('currentUser', JSON.stringify(result.user));
+        } else {
+          console.error('❌ No user in login response!');
+          throw new Error('No user data received');
+        }
       
-      // Call onSignIn which will close modal and update app state
-      onSignIn(result.user.type, result.user, false);
+        // ✅ FIXED: Call onSignIn callback to update App.jsx state
+        onSignIn(result.user.type, result.user, false);
+        
+        // Close modal
+        handleClose();
+        
+      } else {
+        setError(result.message || 'Invalid credentials');
+      }
     } catch (err) {
       console.error('❌ Sign in error:', err);
-      
-      const errorMessage = err.message || 'Sign in failed';
-      
-      if (errorMessage.toLowerCase().includes('invalid') || 
-          errorMessage.toLowerCase().includes('incorrect') || 
-          errorMessage.toLowerCase().includes('wrong')) {
-        setError("Incorrect email or password. Please check your credentials and try again.");
-      } else if (errorMessage.includes('not found') || errorMessage.includes('does not exist')) {
-        setError("No account found with this email. Please check your email or sign up.");
-      } else if (errorMessage.includes('verification') || errorMessage.includes('verify')) {
-        setError("Please verify your email address before signing in.");
-      } else {
-        setError(errorMessage || "Sign in failed. Please try again.");
-      }
+      setError(err.message || 'Sign in failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -81,7 +85,20 @@ export function SignInModal({ open, onClose, onSignIn, onSwitchToSignUp }) {
 
     try {
       const result = await authAPI.googleLogin(credentialResponse.credential, activeTab);
-      onSignIn(result.user.type, result.user, false);
+      
+      if (result.success && result.user) {
+        // Save token and user
+        if (result.token) {
+          localStorage.setItem('authToken', result.token);
+        }
+        localStorage.setItem('currentUser', JSON.stringify(result.user));
+        
+        // Call parent callback
+        onSignIn(result.user.type, result.user, false);
+        handleClose();
+      } else {
+        throw new Error('Google sign-in failed');
+      }
     } catch (err) {
       console.error('Google sign in error:', err);
       setError(err.message || "Google sign-in failed. Please try again.");
@@ -120,7 +137,9 @@ export function SignInModal({ open, onClose, onSignIn, onSwitchToSignUp }) {
       if (errorMessage.includes('not found') || errorMessage.includes('does not exist')) {
         setError("No account found with this email address.");
       } else {
-        setError(errorMessage || "Failed to send reset email. Please try again.");
+        // ✅ Always show success message for security (don't reveal if email exists)
+        setForgotSuccess(true);
+        setError("");
       }
     } finally {
       setForgotLoading(false);
@@ -255,7 +274,10 @@ export function SignInModal({ open, onClose, onSignIn, onSwitchToSignUp }) {
               <div className="text-center text-sm text-gray-600">
                 Don't have an account?{" "}
                 <button 
-                  onClick={onSwitchToSignUp}
+                  onClick={() => {
+                    handleClose();
+                    onSwitchToSignUp('client');
+                  }}
                   className="text-[#008C7E] hover:underline"
                 >
                   Sign up

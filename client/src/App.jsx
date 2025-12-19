@@ -18,6 +18,7 @@ import { TermsOfServicePage } from "./components/TermsOfServicePage.jsx";
 import { PrivacyPolicyPage } from "./components/PrivacyPolicyPage.jsx";
 import { Toast } from "./components/Toast.jsx";
 import { TranslationProvider } from "./contexts/TranslationContext.jsx";
+import { ToastProvider } from "./contexts/ToastContext.jsx";
 import { authAPI } from "./services/api.js";
 import { CompanyProfilePage } from "./components/CompanyProfilePage.jsx";
 
@@ -50,46 +51,73 @@ export default function App() {
     setToast(null);
   };
 
-  // Check for existing session on mount
+  // ✅ FIXED: Check for existing session on mount
   useEffect(() => {
     const checkAuth = async () => {
-      try {
-        // Check regular user auth
-        if (authAPI.isAuthenticated()) {
-          const user = await authAPI.getCurrentUser();
-          if (user) {
-            setIsLoggedIn(true);
-            setUserType(user.type);
-            setCurrentUser(user);
-          }
-        }
+      console.log('🔍 Checking authentication status...');
+  
+      const token = localStorage.getItem('authToken');
+      const savedUser = localStorage.getItem('currentUser');
+  
+      if (!token || !savedUser) {
+        console.log('❌ No token or saved user found');
+        setCurrentUser(null);           // ✅ FIXED: was setUser
+        setIsLoggedIn(false);            // ✅ ADDED: update login state
+        setUserType(null);               // ✅ ADDED: clear user type
+        setIsLoadingAuth(false);         // ✅ FIXED: was setLoading
+        return;
+      }
 
-        // Check admin auth
-        const adminToken = localStorage.getItem('adminToken');
-        const storedAdmin = localStorage.getItem('adminUser');
-        if (adminToken && storedAdmin) {
-          try {
-            const admin = JSON.parse(storedAdmin);
-            if (admin.type === 'admin') {
-              setIsAdminLoggedIn(true);
-              setAdminUser(admin);
-            }
-          } catch (e) {
-            console.error('Admin auth parse error:', e);
-            localStorage.removeItem('adminToken');
-            localStorage.removeItem('adminUser');
-          }
+      try {
+        console.log('🔑 Token found:', token.substring(0, 20) + '...');
+        console.log('👤 Saved user:', JSON.parse(savedUser).email);
+    
+        // Try to verify token with backend
+        const response = await authAPI.getCurrentUser();
+    
+        if (response && response.email) {
+          console.log('✅ Token verified, user authenticated:', response.email);
+          setCurrentUser(response);      // ✅ FIXED: was setUser
+          setIsLoggedIn(true);           // ✅ ADDED: update login state
+          setUserType(response.type);    // ✅ ADDED: set user type
+      
+          // Update localStorage with fresh data
+          localStorage.setItem('currentUser', JSON.stringify(response));
+        } else {
+          // Token invalid, clear auth
+          console.warn('⚠️ Token verification failed');
+          localStorage.removeItem('authToken');
+          localStorage.removeItem('currentUser');
+          setCurrentUser(null);          // ✅ FIXED: was setUser
+          setIsLoggedIn(false);          // ✅ ADDED
+          setUserType(null);             // ✅ ADDED
         }
       } catch (error) {
-        console.error('Auth check failed:', error);
-        authAPI.logout();
+        console.error('❌ Auth check failed:', error.message);
+    
+        // If 401, clear auth and prompt login
+        if (error.message.includes('session has expired') || error.message.includes('sign in')) {
+          localStorage.removeItem('authToken');
+          localStorage.removeItem('currentUser');
+          setCurrentUser(null);          // ✅ FIXED: was setUser
+          setIsLoggedIn(false);          // ✅ ADDED
+          setUserType(null);             // ✅ ADDED
+          showToast('Your session has expired. Please sign in again.', 'error'); // ✅ FIXED: was toast.error
+        } else {
+          // Other errors, use saved user (offline mode)
+          console.log('📴 Backend unavailable, using saved user');
+          const parsedUser = JSON.parse(savedUser);
+          setCurrentUser(parsedUser);    // ✅ FIXED: was setUser
+          setIsLoggedIn(true);           // ✅ ADDED
+          setUserType(parsedUser.type);  // ✅ ADDED
+        }
       } finally {
-        setIsLoadingAuth(false);
+        setIsLoadingAuth(false);         // ✅ FIXED: was setLoading
       }
     };
 
     checkAuth();
-  }, []);
+  }, []); // ✅ Empty dependency array - only run once on mount
 
   // Load language preference from localStorage
   useEffect(() => {
@@ -175,7 +203,7 @@ export default function App() {
   };
 
   const handleSignIn = async (type, userData = null, isNewUser = false) => {
-    // CRITICAL FIX: Close ALL modals IMMEDIATELY before any other action
+    // Close ALL modals IMMEDIATELY before any other action
     setShowSignInModal(false);
     setShowSignUpModal(false);
     setShowAdminLoginModal(false);
@@ -308,11 +336,13 @@ export default function App() {
     }, 150);
   };
 
+  // ✅ Loading screen
   if (isLoadingAuth) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#008C7E] mx-auto mb-4"></div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#008C7E] mx-auto mb-4">
+            </div>
           <p className="text-gray-600">Loading...</p>
         </div>
       </div>
@@ -320,180 +350,183 @@ export default function App() {
   }
 
   return (
-    <TranslationProvider defaultLanguage={language}>
-      <div className={`min-h-screen flex flex-col bg-gray-50 ${language === 'ur' ? 'rtl' : 'ltr'}`}>
-        <Header 
-          isLoggedIn={isLoggedIn} 
-          isAdminLoggedIn={isAdminLoggedIn}
-          onNavigate={handleNavigate}
-          onSignInClick={() => setShowSignInModal(true)}
-          onAdminLoginClick={() => setShowAdminLoginModal(true)}
-          onSignOut={handleSignOut}
-          onAdminSignOut={handleAdminSignOut}
-          language={language}
-          onLanguageChange={handleLanguageChange}
-          userType={userType}
-          currentUser={currentUser}
-          adminUser={adminUser}
-        />
-        
-        <main className="flex-1">
-          {currentPage === "home" && (
-            <HomePage 
-              onNavigate={handleNavigate} 
-              language={language} 
-            />
-          )}
-          
-          {currentPage === "browse" && (
-            <BrowsePage 
-              onNavigate={handleNavigate} 
-              activeFilter={activeFilter} 
-              language={language} 
-              currentUser={currentUser}
-              userType={userType}
-              isLoggedIn={isLoggedIn}
-            />
-          )}
-          
-          {currentPage === "browse-projects" && isLoggedIn && (
-            <BrowseProjectsPage 
-              onNavigate={handleNavigate}
-              currentUser={currentUser}
-              userType={userType}
-            />
-          )}
-          
-          {currentPage === "project-detail" && selectedProjectId && isLoggedIn && (
-            <ProjectDetailPage
-              projectId={selectedProjectId}
-              onNavigate={handleNavigate}
-              currentUser={currentUser}
-              userType={userType}
-            />
-          )}
-          
-          {currentPage === "post-project" && isLoggedIn && (
-            <PostProjectPage 
-              onNavigate={handleNavigate} 
-              language={language} 
-              currentUser={currentUser}
-            />
-          )}
-          
-          {currentPage === "edit-project" && selectedProjectId && isLoggedIn && (
-            <PostProjectPage 
-              onNavigate={handleNavigate} 
-              language={language} 
-              currentUser={currentUser}
-              projectId={selectedProjectId}
-            />
-          )}
-          
-          {currentPage === "dashboard" && isLoggedIn && (
-            <DashboardPage 
-              onNavigate={handleNavigate} 
-              language={language} 
-              userType={userType} 
-              currentUser={currentUser} 
-            />
-          )}
-          
-          {currentPage === "company-profile" && selectedCompanyId && (
-            <CompanyProfilePage
-              companyId={selectedCompanyId}
-              onNavigate={handleNavigate}
-              currentUser={currentUser}
-              userType={userType}
-              isLoggedIn={isLoggedIn}
-              language={language}
-            />
-          )}
-          
-          {currentPage === "about" && (
-            <AboutPage 
-              onNavigate={handleNavigate} 
-              language={language} 
-            />
-          )}
-          
-          {currentPage === "contact" && (
-            <ContactPage 
-              language={language}
-              onNavigate={handleNavigate}
-              isLoggedIn={isLoggedIn}
-              userType={userType}
-              onSignUpClick={handleOpenSignUp}
-            />
-          )}
-          
-          {currentPage === "admin" && isAdminLoggedIn && (
-            <AdminDashboard 
-              language={language} 
-              onAdminSignOut={handleAdminSignOut}
-              adminUser={adminUser}
-              onNavigate={handleNavigate}
-            />
-          )}
-          
-          {currentPage === "terms" && (
-            <TermsOfServicePage 
-              onNavigate={handleNavigate} 
-              language={language} 
-            />
-          )}
-          
-          {currentPage === "privacy" && (
-            <PrivacyPolicyPage 
-              onNavigate={handleNavigate} 
-              language={language} 
-            />
-          )}
-        </main>
-
-        <Footer language={language} onNavigate={handleNavigate} />
-
-        {/* FIXED: Modals only open when explicitly triggered, never auto-open */}
-        {showSignInModal && (
-          <SignInModal 
-            open={showSignInModal}
-            onClose={() => setShowSignInModal(false)}
-            onSignIn={handleSignIn}
-            onSwitchToSignUp={handleSwitchToSignUp}
+    <ToastProvider>
+      <TranslationProvider defaultLanguage={language}>
+        <div className={`min-h-screen flex flex-col bg-gray-50 ${language === 'ur' ? 'rtl' : 'ltr'}`}>
+          <Header 
+            isLoggedIn={isLoggedIn} 
+            isAdminLoggedIn={isAdminLoggedIn}
             onNavigate={handleNavigate}
+            onSignInClick={() => setShowSignInModal(true)}
+            onAdminLoginClick={() => setShowAdminLoginModal(true)}
+            onSignOut={handleSignOut}
+            onAdminSignOut={handleAdminSignOut}
+            language={language}
+            onLanguageChange={handleLanguageChange}
+            userType={userType}
+            currentUser={currentUser}
+            adminUser={adminUser}
           />
-        )}
+          
+          <main className="flex-1">
+            {currentPage === "home" && (
+              <HomePage 
+                onNavigate={handleNavigate} 
+                language={language} 
+              />
+            )}
+            
+            {currentPage === "browse" && (
+              <BrowsePage 
+                onNavigate={handleNavigate} 
+                activeFilter={activeFilter} 
+                language={language} 
+                currentUser={currentUser}
+                userType={userType}
+                isLoggedIn={isLoggedIn}
+              />
+            )}
+            
+            {currentPage === "browse-projects" && isLoggedIn && (
+              <BrowseProjectsPage 
+                onNavigate={handleNavigate}
+                currentUser={currentUser}
+                userType={userType}
+              />
+            )}
+            
+            {currentPage === "project-detail" && selectedProjectId && isLoggedIn && (
+              <ProjectDetailPage
+                projectId={selectedProjectId}
+                onNavigate={handleNavigate}
+                currentUser={currentUser}
+                userType={userType}
+              />
+            )}
+            
+            {currentPage === "post-project" && isLoggedIn && (
+              <PostProjectPage 
+                onNavigate={handleNavigate} 
+                language={language} 
+                currentUser={currentUser}
+              />
+            )}
+            
+            {currentPage === "edit-project" && selectedProjectId && isLoggedIn && (
+              <PostProjectPage 
+                onNavigate={handleNavigate} 
+                language={language} 
+                currentUser={currentUser}
+                projectId={selectedProjectId}
+              />
+            )}
+            
+            {currentPage === "dashboard" && isLoggedIn && (
+              <DashboardPage 
+                onNavigate={handleNavigate} 
+                language={language} 
+                userType={userType} 
+                currentUser={currentUser} 
+              />
+            )}
+            
+            {currentPage === "company-profile" && selectedCompanyId && (
+              <CompanyProfilePage
+                companyId={selectedCompanyId}
+                onNavigate={handleNavigate}
+                currentUser={currentUser}
+                userType={userType}
+                isLoggedIn={isLoggedIn}
+                language={language}
+              />
+            )}
+            
+            {currentPage === "about" && (
+              <AboutPage 
+                onNavigate={handleNavigate} 
+                language={language} 
+              />
+            )}
+            
+            {currentPage === "contact" && (
+              <ContactPage 
+                language={language}
+                onNavigate={handleNavigate}
+                isLoggedIn={isLoggedIn}
+                userType={userType}
+                onSignUpClick={handleOpenSignUp}
+              />
+            )}
+            
+            {currentPage === "admin" && isAdminLoggedIn && (
+              <AdminDashboard 
+                language={language} 
+                onAdminSignOut={handleAdminSignOut}
+                adminUser={adminUser}
+                onNavigate={handleNavigate}
+              />
+            )}
+            
+            {currentPage === "terms" && (
+              <TermsOfServicePage 
+                onNavigate={handleNavigate} 
+                language={language} 
+              />
+            )}
+            
+            {currentPage === "privacy" && (
+              <PrivacyPolicyPage 
+                onNavigate={handleNavigate} 
+                language={language} 
+              />
+            )}
+          </main>
 
-        {showSignUpModal && (
-          <SignUpModal
-            open={showSignUpModal}
-            onClose={() => setShowSignUpModal(false)}
-            onSignUp={handleSignIn}
-            onSwitchToSignIn={handleSwitchToSignIn}
-            onNavigate={handleNavigate}
-            defaultTab={signUpDefaultTab}
-          />
-        )}
+          <Footer language={language} onNavigate={handleNavigate} />
 
-        {showAdminLoginModal && (
-          <AdminLoginModal
-            open={showAdminLoginModal}
-            onClose={() => setShowAdminLoginModal(false)}
-            onAdminLogin={handleAdminLogin}
-          />
-        )}
+          {/* Modals only open when explicitly triggered */}
+          {showSignInModal && (
+            <SignInModal 
+              open={showSignInModal}
+              onClose={() => setShowSignInModal(false)}
+              onSignIn={handleSignIn}
+              onSwitchToSignUp={handleSwitchToSignUp}
+              onNavigate={handleNavigate}
+            />
+          )}
 
-        <Chatbot language={language} />
+          {showSignUpModal && (
+            <SignUpModal
+              open={showSignUpModal}
+              onClose={() => setShowSignUpModal(false)}
+              onSignUp={handleSignIn}
+              onSwitchToSignIn={handleSwitchToSignIn}
+              onNavigate={handleNavigate}
+              defaultTab={signUpDefaultTab}
+            />
+          )}
 
-        {toast && (
-          <Toast
-            message={toast.message}
-            type={toast.type}
-            onClose={closeToast}
-            duration={3000}
-          />
-        )}
-      </div>
-    </TranslationProvider>
+          {showAdminLoginModal && (
+            <AdminLoginModal
+              open={showAdminLoginModal}
+              onClose={() => setShowAdminLoginModal(false)}
+              onAdminLogin={handleAdminLogin}
+            />
+          )}
+
+          <Chatbot language={language} />
+
+          {/* ✅ Keep this Toast component since you're not using ToastContext everywhere yet */}
+          {toast && (
+            <Toast
+              message={toast.message}
+              type={toast.type}
+              onClose={closeToast}
+              duration={3000}
+            />
+          )}
+        </div>
+      </TranslationProvider>
+    </ToastProvider>
   );
 }

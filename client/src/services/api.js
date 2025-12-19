@@ -16,11 +16,16 @@ const getAuthToken = () => {
   return localStorage.getItem('authToken');
 };
 
-// Helper function to check if backend is available
+// âœ… IMPROVED: Cache backend availability longer
 let backendAvailable = null;
+let lastCheckTime = 0;
+const CHECK_INTERVAL = 30000; // Check every 30 seconds instead of every request
 
 const checkBackendAvailability = async () => {
-  if (backendAvailable !== null) {
+  const now = Date.now();
+  
+  // âœ… Return cached result if checked recently
+  if (backendAvailable !== null && (now - lastCheckTime) < CHECK_INTERVAL) {
     return backendAvailable;
   }
   
@@ -28,7 +33,7 @@ const checkBackendAvailability = async () => {
   
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // Increased to 5s
     
     const response = await fetch(`${API_URL}/health`, {
       signal: controller.signal,
@@ -38,6 +43,7 @@ const checkBackendAvailability = async () => {
     
     clearTimeout(timeoutId);
     backendAvailable = response.ok;
+    lastCheckTime = now; // âœ… Update check time
     
     if (!backendAvailable) {
       console.warn('⚠️ Backend not available, using mock mode');
@@ -49,10 +55,12 @@ const checkBackendAvailability = async () => {
   } catch (error) {
     console.log('🔄 Backend check failed, using mock mode');
     backendAvailable = false;
+    lastCheckTime = now; // âœ… Update check time even on failure
     return false;
   }
 };
 
+// Helper function for fetch with auth token
 // Helper function for fetch with auth token
 const fetchWithAuth = async (url, options = {}) => {
   const isAvailable = await checkBackendAvailability();
@@ -63,6 +71,13 @@ const fetchWithAuth = async (url, options = {}) => {
   }
 
   const token = getAuthToken();
+  
+  // âœ… CRITICAL FIX: Check if token exists for protected routes
+  if (!token && !url.includes('/auth/login') && !url.includes('/auth/register')) {
+    console.warn(`⚠️ No auth token for protected route: ${url}`);
+    throw new Error('Not authenticated. Please sign in.');
+  }
+
   const headers = {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
@@ -71,21 +86,25 @@ const fetchWithAuth = async (url, options = {}) => {
 
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
+    console.log('🔑 Token attached to request:', token.substring(0, 20) + '...'); // âœ… Debug log
   }
 
   try {
+    console.log(`📡 API Request: ${options.method || 'GET'} ${API_URL}${url}`); // âœ… Debug log
+    
     const response = await fetch(`${API_URL}${url}`, {
       ...options,
       headers,
       credentials: 'include'
     });
 
-    // ✅ FIXED: Don't intercept 401s for Login endpoints
-    // If we are logging in, a 401 simply means "Wrong Password", not "Token Expired"
+    // Don't intercept 401s for Login endpoints
     const isLoginRequest = url.includes('/auth/login');
 
     if (response.status === 401 && !isLoginRequest) {
       const data = await response.json().catch(() => ({}));
+      
+      console.log('❌ 401 Response:', data); // âœ… Debug log
       
       if (data.code === 'TOKEN_EXPIRED') {
         const refreshed = await authAPI.refreshToken();
@@ -105,8 +124,10 @@ const fetchWithAuth = async (url, options = {}) => {
         }
       }
       
+      // âœ… Clear auth data on 401
       localStorage.removeItem('authToken');
       localStorage.removeItem('currentUser');
+      
       throw new Error('Your session has expired. Please sign in again.');
     }
 
@@ -458,9 +479,434 @@ export const resetBackendCheck = () => {
 export { checkBackendAvailability };
 
 // ==========================================
-// Projects API - FIXED
+// BID API - ENHANCED SECTION
+// ==========================================
+export const bidAPI = {
+  // Submit bid - FIXED: matches BidModal.jsx call
+  async submit(projectId, bidData) {
+    console.log('📤 Submitting bid for project:', projectId);
+    
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/bids`, {
+        method: 'POST',
+        body: JSON.stringify(bidData)
+      });
+      
+      if (data) {
+        console.log('✅ Bid submitted via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend not available, using mock');
+      return this._mockSubmit(projectId, bidData);
+    } catch (error) {
+      console.log('🔄 Error submitting bid:', error.message);
+      return this._mockSubmit(projectId, bidData);
+    }
+  },
+
+  // Mock submit bid - FIXED
+  _mockSubmit(projectId, bidData) {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser) {
+      throw new Error('Not authenticated');
+    }
+    
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    const newBid = {
+      _id: Date.now().toString(),
+      ...bidData,
+      companyId: currentUser.companyId || currentUser._id,
+      companyName: currentUser.companyName || currentUser.name,
+      status: 'pending',
+      submittedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    
+    if (!projects[projectIndex].bids) {
+      projects[projectIndex].bids = [];
+    }
+    
+    projects[projectIndex].bids.push(newBid);
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    console.log('✅ Mock bid created:', newBid._id);
+    
+    return {
+      success: true,
+      bid: newBid,
+      message: 'Bid submitted successfully'
+    };
+  },
+
+  // Update bid - FIXED: matches BidModal.jsx call
+  async update(projectId, bidId, bidData) {
+    console.log('✏️ Updating bid:', bidId);
+    
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/bids/${bidId}`, {
+        method: 'PUT',
+        body: JSON.stringify(bidData)
+      });
+      
+      if (data) {
+        console.log('✅ Bid updated via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend not available, using mock');
+      return this._mockUpdate(projectId, bidId, bidData);
+    } catch (error) {
+      console.log('🔄 Error updating bid:', error.message);
+      return this._mockUpdate(projectId, bidId, bidData);
+    }
+  },
+
+  // Mock update bid
+  _mockUpdate(projectId, bidId, bidData) {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser) {
+      throw new Error('Not authenticated');
+    }
+    
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    const bidIndex = projects[projectIndex].bids?.findIndex(b => b._id === bidId);
+    
+    if (bidIndex === -1 || !projects[projectIndex].bids) {
+      throw new Error('Bid not found');
+    }
+    
+    // Check if bid belongs to current user
+    const existingBid = projects[projectIndex].bids[bidIndex];
+    if (existingBid.companyId !== (currentUser.companyId || currentUser._id)) {
+      throw new Error('Not authorized to update this bid');
+    }
+    
+    projects[projectIndex].bids[bidIndex] = {
+      ...existingBid,
+      ...bidData,
+      updatedAt: new Date().toISOString()
+    };
+    
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      bid: projects[projectIndex].bids[bidIndex],
+      message: 'Bid updated successfully'
+    };
+  },
+
+  // Accept bid - FIXED: matches DashboardPage.jsx call
+  async accept(projectId, bidId) {
+    console.log('✅ Accepting bid:', bidId);
+    
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/bids/${bidId}/accept`, {
+        method: 'POST'
+      });
+      
+      if (data) {
+        console.log('✅ Bid accepted via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend not available, using mock');
+      return this._mockAccept(projectId, bidId);
+    } catch (error) {
+      console.log('🔄 Error accepting bid:', error.message);
+      return this._mockAccept(projectId, bidId);
+    }
+  },
+
+  // Mock accept bid
+  _mockAccept(projectId, bidId) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    const bidIndex = projects[projectIndex].bids?.findIndex(b => b._id === bidId);
+    
+    if (bidIndex === -1 || !projects[projectIndex].bids) {
+      throw new Error('Bid not found');
+    }
+    
+    // Accept this bid
+    projects[projectIndex].bids[bidIndex].status = 'accepted';
+    projects[projectIndex].bids[bidIndex].acceptedAt = new Date().toISOString();
+    
+    // Reject all other bids
+    projects[projectIndex].bids.forEach((bid, index) => {
+      if (index !== bidIndex && bid.status === 'pending') {
+        bid.status = 'rejected';
+        bid.rejectedAt = new Date().toISOString();
+      }
+    });
+    
+    // Update project status
+    projects[projectIndex].status = 'active';
+    projects[projectIndex].selectedBid = projects[projectIndex].bids[bidIndex];
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      bid: projects[projectIndex].bids[bidIndex],
+      project: projects[projectIndex],
+      message: 'Bid accepted successfully'
+    };
+  },
+
+  // Reject bid - FIXED: matches DashboardPage.jsx call
+  async reject(projectId, bidId, rejectionData = {}) {
+    console.log('❌ Rejecting bid:', bidId);
+    
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/bids/${bidId}/reject`, {
+        method: 'POST',
+        body: JSON.stringify(rejectionData)
+      });
+      
+      if (data) {
+        console.log('✅ Bid rejected via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend not available, using mock');
+      return this._mockReject(projectId, bidId, rejectionData);
+    } catch (error) {
+      console.log('🔄 Error rejecting bid:', error.message);
+      return this._mockReject(projectId, bidId, rejectionData);
+    }
+  },
+
+  // Mock reject bid
+  _mockReject(projectId, bidId, rejectionData = {}) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    const bidIndex = projects[projectIndex].bids?.findIndex(b => b._id === bidId);
+    
+    if (bidIndex === -1 || !projects[projectIndex].bids) {
+      throw new Error('Bid not found');
+    }
+    
+    projects[projectIndex].bids[bidIndex].status = 'rejected';
+    projects[projectIndex].bids[bidIndex].rejectedAt = new Date().toISOString();
+    projects[projectIndex].bids[bidIndex].rejectionReason = rejectionData.reason;
+    
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      bid: projects[projectIndex].bids[bidIndex],
+      message: 'Bid rejected successfully'
+    };
+  },
+
+  // Withdraw bid - FIXED: matches DashboardPage.jsx call
+  async withdraw(projectId, bidId) {
+    console.log('↩️ Withdrawing bid:', bidId);
+    
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/bids/${bidId}/withdraw`, {
+        method: 'POST'
+      });
+      
+      if (data) {
+        console.log('✅ Bid withdrawn via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend not available, using mock');
+      return this._mockWithdraw(projectId, bidId);
+    } catch (error) {
+      console.log('🔄 Error withdrawing bid:', error.message);
+      return this._mockWithdraw(projectId, bidId);
+    }
+  },
+
+  // Mock withdraw bid
+  _mockWithdraw(projectId, bidId) {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser) {
+      throw new Error('Not authenticated');
+    }
+    
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    const bidIndex = projects[projectIndex].bids?.findIndex(b => b._id === bidId);
+    
+    if (bidIndex === -1 || !projects[projectIndex].bids) {
+      throw new Error('Bid not found');
+    }
+    
+    // Check if bid belongs to current user
+    const bid = projects[projectIndex].bids[bidIndex];
+    if (bid.companyId !== (currentUser.companyId || currentUser._id)) {
+      throw new Error('Not authorized to withdraw this bid');
+    }
+    
+    if (bid.status !== 'pending') {
+      throw new Error('Only pending bids can be withdrawn');
+    }
+    
+    projects[projectIndex].bids[bidIndex].status = 'withdrawn';
+    projects[projectIndex].bids[bidIndex].withdrawnAt = new Date().toISOString();
+    
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      bid: projects[projectIndex].bids[bidIndex],
+      message: 'Bid withdrawn successfully'
+    };
+  },
+
+  // Get company bids - FIXED: matches DashboardPage.jsx call
+  async getCompanyBids(filters = {}) {
+    console.log('📋 Fetching company bids');
+    
+    try {
+      const queryParams = new URLSearchParams(filters).toString();
+      const data = await fetchWithAuth(`/bids/company${queryParams ? `?${queryParams}` : ''}`);
+      
+      if (data) {
+        console.log(`✅ Found ${data.bids?.length || 0} company bids from backend`);
+        return data;
+      }
+      
+      console.log('🔄 Backend not available, using mock');
+      return this._mockGetCompanyBids(filters);
+    } catch (error) {
+      console.log('🔄 Error fetching company bids:', error.message);
+      return this._mockGetCompanyBids(filters);
+    }
+  },
+
+  // Mock get company bids
+  _mockGetCompanyBids(filters = {}) {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser) {
+      throw new Error('Not authenticated');
+    }
+    
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    
+    // Get all bids from current company
+    const allBids = [];
+    
+    projects.forEach(project => {
+      if (project.bids) {
+        project.bids.forEach(bid => {
+          if (bid.companyId === (currentUser.companyId || currentUser._id)) {
+            allBids.push({
+              ...bid,
+              projectId: project._id,
+              projectTitle: project.title,
+              projectCategory: project.category,
+              projectStatus: project.status
+            });
+          }
+        });
+      }
+    });
+    
+    // Apply filters
+    let filteredBids = allBids;
+    
+    if (filters.status && filters.status !== 'all') {
+      filteredBids = filteredBids.filter(b => b.status === filters.status);
+    }
+    
+    return {
+      success: true,
+      bids: filteredBids,
+      total: filteredBids.length,
+      stats: {
+        pending: allBids.filter(b => b.status === 'pending').length,
+        accepted: allBids.filter(b => b.status === 'accepted').length,
+        rejected: allBids.filter(b => b.status === 'rejected').length,
+        withdrawn: allBids.filter(b => b.status === 'withdrawn').length
+      }
+    };
+  },
+
+  // // Get bid by ID
+  // async getById(bidId) {
+  //   try {
+  //     const data = await fetchWithAuth(`/bids/${bidId}`);
+  //     if (data) return data;
+      
+  //     return this._mockGetById(bidId);
+  //   } catch (error) {
+  //     return this._mockGetById(bidId);
+  //   }
+  // },
+
+  // Mock get bid by ID
+  _mockGetById(bidId) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    
+    for (const project of projects) {
+      if (project.bids) {
+        const bid = project.bids.find(b => b._id === bidId);
+        if (bid) {
+          return {
+            success: true,
+            bid: {
+              ...bid,
+              projectId: project._id,
+              projectTitle: project.title
+            }
+          };
+        }
+      }
+    }
+    
+    throw new Error('Bid not found');
+  }
+};
+
+// ==========================================
+// Projects API - ENHANCED SECTION
 // ==========================================
 export const projectAPI = {
+  // ==========================================
+  // EXISTING FUNCTIONS (updated)
+  // ==========================================
+
   // Get all projects
   async getAll(filters = {}) {
     console.log('📋 Fetching projects with filters:', filters);
@@ -536,7 +982,7 @@ export const projectAPI = {
     };
   },
 
-  // Create new project - COMPLETELY FIXED
+  // Create new project
   async create(projectData) {
     console.log('🆕 Creating project:', projectData.title);
     
@@ -556,13 +1002,11 @@ export const projectAPI = {
       return this._mockCreate(projectData);
     } catch (error) {
       console.log('🔄 Error creating project:', error.message);
-      
-      // If backend fails for ANY reason (network, 500, db hang), fall back to mock
       return this._mockCreate(projectData);
     }
   },
 
-  // Mock create project - FIXED
+  // Mock create project
   _mockCreate(projectData) {
     const currentUser = authAPI.getCachedUser();
     if (!currentUser) {
@@ -577,8 +1021,10 @@ export const projectAPI = {
       _id: Date.now().toString(),
       ...projectData,
       clientId: currentUser._id,
+      clientName: currentUser.name,
       status: projectData.status || 'posted',
       bids: [],
+      invitedCompanies: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       viewCount: 0
@@ -623,57 +1069,9 @@ export const projectAPI = {
     };
   },
 
-  // Submit bid
+  // Submit bid - Alias for bidAPI.submit()
   async submitBid(projectId, bidData) {
-    try {
-      const data = await fetchWithAuth(`/projects/${projectId}/bids`, {
-        method: 'POST',
-        body: JSON.stringify(bidData)
-      });
-      
-      if (data) return data;
-      
-      return this._mockSubmitBid(projectId, bidData);
-    } catch (error) {
-      return this._mockSubmitBid(projectId, bidData);
-    }
-  },
-
-  // Mock submit bid
-  _mockSubmitBid(projectId, bidData) {
-    const currentUser = authAPI.getCachedUser();
-    if (!currentUser) {
-      throw new Error('Not authenticated');
-    }
-    
-    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
-    const projectIndex = projects.findIndex(p => p._id === projectId);
-    
-    if (projectIndex === -1) {
-      throw new Error('Project not found');
-    }
-    
-    const newBid = {
-      _id: Date.now().toString(),
-      ...bidData,
-      companyId: currentUser.companyId || currentUser._id,
-      status: 'pending',
-      createdAt: new Date().toISOString()
-    };
-    
-    if (!projects[projectIndex].bids) {
-      projects[projectIndex].bids = [];
-    }
-    
-    projects[projectIndex].bids.push(newBid);
-    projects[projectIndex].updatedAt = new Date().toISOString();
-    
-    localStorage.setItem('projects', JSON.stringify(projects));
-    
-    return {
-      success: true,
-      bid: newBid
-    };
+    return bidAPI.submit(projectId, bidData);
   },
 
   // Update project
@@ -686,14 +1084,43 @@ export const projectAPI = {
       
       if (data) return data;
       
-      throw new Error('Backend not available');
+      return this._mockUpdate(id, projectData);
     } catch (error) {
-      throw error;
+      return this._mockUpdate(id, projectData);
     }
   },
 
-  // Delete project
-  async delete(id) {
+  // Mock update project
+  _mockUpdate(id, projectData) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === id);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    const currentUser = authAPI.getCachedUser();
+    if (projects[projectIndex].clientId !== currentUser._id) {
+      throw new Error('Not authorized to update this project');
+    }
+    
+    projects[projectIndex] = {
+      ...projects[projectIndex],
+      ...projectData,
+      updatedAt: new Date().toISOString()
+    };
+    
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      project: projects[projectIndex],
+      message: 'Project updated successfully'
+    };
+  },
+
+  // Cancel/Delete project
+  async cancel(id) {
     try {
       const data = await fetchWithAuth(`/projects/${id}`, {
         method: 'DELETE'
@@ -701,42 +1128,67 @@ export const projectAPI = {
       
       if (data) return data;
       
-      throw new Error('Backend not available');
+      return this._mockCancel(id);
     } catch (error) {
-      throw error;
+      return this._mockCancel(id);
     }
   },
 
-  // Update bid status
+  // Mock cancel project
+  _mockCancel(id) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === id);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    const currentUser = authAPI.getCachedUser();
+    if (projects[projectIndex].clientId !== currentUser._id) {
+      throw new Error('Not authorized to cancel this project');
+    }
+    
+    projects[projectIndex].status = 'cancelled';
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      message: 'Project cancelled successfully'
+    };
+  },
+
+  // Update bid status - for compatibility
   async updateBidStatus(projectId, bidId, status) {
-    try {
-      const data = await fetchWithAuth(`/projects/${projectId}/bids/${bidId}`, {
-        method: 'PUT',
-        body: JSON.stringify({ status })
-      });
-      
-      if (data) return data;
-      
-      throw new Error('Backend not available');
-    } catch (error) {
-      throw error;
+    if (status === 'accepted') {
+      return bidAPI.accept(projectId, bidId);
+    } else if (status === 'rejected') {
+      return bidAPI.reject(projectId, bidId, { reason: 'Not selected' });
+    } else {
+      return bidAPI.update(projectId, bidId, { status });
     }
   },
 
-  // Get company bids
+  // Get company bids - Alias for bidAPI.getCompanyBids()
   async getCompanyBids() {
+    return bidAPI.getCompanyBids();
+  },
+
+  // Get company projects
+  async getCompanyProjects() {
     try {
-      const data = await fetchWithAuth('/projects/company/my-bids');
+      const data = await fetchWithAuth('/projects/company/my-projects');
       if (data) return data;
       
-      return this._mockGetCompanyBids();
+      return this._mockGetCompanyProjects();
     } catch (error) {
-      return this._mockGetCompanyBids();
+      return this._mockGetCompanyProjects();
     }
   },
 
-  // Mock get company bids
-  _mockGetCompanyBids() {
+  // Mock get company projects
+  _mockGetCompanyProjects() {
     const currentUser = authAPI.getCachedUser();
     if (!currentUser) {
       throw new Error('Not authenticated');
@@ -744,33 +1196,474 @@ export const projectAPI = {
     
     const projects = JSON.parse(localStorage.getItem('projects') || '[]');
     
-    const projectsWithBids = projects.filter(p => 
+    // Get projects where company has accepted bid
+    const companyProjects = projects.filter(p => 
       p.bids && p.bids.some(bid => 
-        bid.companyId === currentUser.companyId || bid.companyId === currentUser._id
+        bid.companyId === (currentUser.companyId || currentUser._id) && 
+        bid.status === 'accepted'
       )
     );
     
     return {
       success: true,
+      projects: companyProjects
+    };
+  },
+
+  // Get company invitations
+  async getCompanyInvitations() {
+    try {
+      const data = await fetchWithAuth('/projects/company/invitations');
+      if (data) return data;
+      
+      return this._mockGetCompanyInvitations();
+    } catch (error) {
+      return this._mockGetCompanyInvitations();
+    }
+  },
+
+  // Mock get company invitations
+  _mockGetCompanyInvitations() {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser || !currentUser.companyId) {
+      return { success: true, invitations: [] };
+    }
+    
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    
+    const invitations = projects.filter(p => 
+      p.invitedCompanies && 
+      p.invitedCompanies.includes(currentUser.companyId) &&
+      ['posted', 'bidding'].includes(p.status)
+    );
+    
+    return {
+      success: true,
+      invitations: invitations.map(project => ({
+        ...project,
+        hasBid: project.bids?.some(bid => bid.companyId === currentUser.companyId) || false
+      }))
+    };
+  },
+
+  // Invite company to bid
+  async inviteCompany(projectId, companyId) {
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/invite`, {
+        method: 'POST',
+        body: JSON.stringify({ companyId })
+      });
+      
+      if (data) return data;
+      
+      return this._mockInviteCompany(projectId, companyId);
+    } catch (error) {
+      return this._mockInviteCompany(projectId, companyId);
+    }
+  },
+
+  // Mock invite company
+  _mockInviteCompany(projectId, companyId) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    if (!projects[projectIndex].invitedCompanies) {
+      projects[projectIndex].invitedCompanies = [];
+    }
+    
+    // Check if already invited
+    if (projects[projectIndex].invitedCompanies.includes(companyId)) {
+      throw new Error('Company already invited to this project');
+    }
+    
+    projects[projectIndex].invitedCompanies.push(companyId);
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      message: 'Company invited successfully'
+    };
+  },
+
+  // ==========================================
+  // NEW FUNCTIONS (based on backend routes)
+  // ==========================================
+
+  // ✅ NEW: Get project bids
+  async getProjectBids(projectId) {
+    console.log('📋 Fetching bids for project:', projectId);
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/bids`);
+      if (data) {
+        console.log(`✅ Found ${data.bids?.length || 0} bids from backend`);
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockGetProjectBids(projectId);
+    } catch (error) {
+      console.log('🔄 Error fetching project bids, using mock');
+      return this._mockGetProjectBids(projectId);
+    }
+  },
+
+  // Mock get project bids
+  _mockGetProjectBids(projectId) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const project = projects.find(p => p._id === projectId);
+    
+    if (!project) {
+      throw new Error('Project not found');
+    }
+    
+    return {
+      success: true,
+      bids: project.bids || [],
+      projectTitle: project.title,
+      isOwner: true // This would need proper auth check
+    };
+  },
+
+  // ✅ NEW: Get company's bids (different from getCompanyBids)
+  async getCompanyMyBids(filters = {}) {
+    console.log('📋 Fetching company bids via projects endpoint');
+    try {
+      const data = await fetchWithAuth('/projects/company/my-bids');
+      if (data) {
+        console.log(`✅ Found ${data.projects?.length || 0} company bids from backend`);
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockGetCompanyMyBids(filters);
+    } catch (error) {
+      console.log('🔄 Error fetching company bids, using mock');
+      return this._mockGetCompanyMyBids(filters);
+    }
+  },
+
+  // Mock get company my bids
+  _mockGetCompanyMyBids(filters = {}) {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser) {
+      throw new Error('Not authenticated');
+    }
+    
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const companyProjects = projects.filter(p => 
+      p.bids && p.bids.some(bid => 
+        bid.companyId === (currentUser.companyId || currentUser._id)
+      )
+    );
+    
+    const projectsWithBids = companyProjects.map(project => {
+      const projectObj = { ...project };
+      projectObj.myBid = project.bids.find(bid => 
+        bid.companyId === (currentUser.companyId || currentUser._id)
+      );
+      delete projectObj.bids;
+      return projectObj;
+    });
+    
+    return {
+      success: true,
       projects: projectsWithBids
+    };
+  },
+
+  // ✅ NEW: Accept bid (client only)
+  async acceptBid(projectId, bidId) {
+    console.log('✅ Accepting bid:', bidId);
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/bids/${bidId}/accept`, {
+        method: 'POST'
+      });
+      
+      if (data) {
+        console.log('✅ Bid accepted via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockAcceptBid(projectId, bidId);
+    } catch (error) {
+      console.log('🔄 Error accepting bid, using mock');
+      return this._mockAcceptBid(projectId, bidId);
+    }
+  },
+
+  // Mock accept bid
+  _mockAcceptBid(projectId, bidId) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    const bidIndex = projects[projectIndex].bids?.findIndex(b => b._id === bidId);
+    
+    if (bidIndex === -1 || !projects[projectIndex].bids) {
+      throw new Error('Bid not found');
+    }
+    
+    // Accept this bid
+    projects[projectIndex].bids[bidIndex].status = 'accepted';
+    projects[projectIndex].bids[bidIndex].acceptedAt = new Date().toISOString();
+    
+    // Reject all other bids
+    projects[projectIndex].bids.forEach((bid, index) => {
+      if (index !== bidIndex && bid.status === 'pending') {
+        bid.status = 'rejected';
+        bid.rejectedAt = new Date().toISOString();
+      }
+    });
+    
+    // Update project status
+    projects[projectIndex].status = 'active';
+    projects[projectIndex].selectedBid = projects[projectIndex].bids[bidIndex];
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      project: projects[projectIndex],
+      message: 'Bid accepted successfully'
+    };
+  },
+
+  // ✅ NEW: Reject bid (client only)
+  async rejectBid(projectId, bidId, rejectionData = {}) {
+    console.log('❌ Rejecting bid:', bidId);
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/bids/${bidId}/reject`, {
+        method: 'POST',
+        body: JSON.stringify(rejectionData)
+      });
+      
+      if (data) {
+        console.log('✅ Bid rejected via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockRejectBid(projectId, bidId, rejectionData);
+    } catch (error) {
+      console.log('🔄 Error rejecting bid, using mock');
+      return this._mockRejectBid(projectId, bidId, rejectionData);
+    }
+  },
+
+  // Mock reject bid
+  _mockRejectBid(projectId, bidId, rejectionData = {}) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    const bidIndex = projects[projectIndex].bids?.findIndex(b => b._id === bidId);
+    
+    if (bidIndex === -1 || !projects[projectIndex].bids) {
+      throw new Error('Bid not found');
+    }
+    
+    projects[projectIndex].bids[bidIndex].status = 'rejected';
+    projects[projectIndex].bids[bidIndex].rejectedAt = new Date().toISOString();
+    projects[projectIndex].bids[bidIndex].rejectionReason = rejectionData.reason;
+    
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      project: projects[projectIndex],
+      message: 'Bid rejected successfully'
+    };
+  },
+
+  // ✅ NEW: Withdraw bid (company only)
+  async withdrawBid(projectId, bidId) {
+    console.log('↩️ Withdrawing bid:', bidId);
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/bids/${bidId}/withdraw`, {
+        method: 'POST'
+      });
+      
+      if (data) {
+        console.log('✅ Bid withdrawn via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockWithdrawBid(projectId, bidId);
+    } catch (error) {
+      console.log('🔄 Error withdrawing bid, using mock');
+      return this._mockWithdrawBid(projectId, bidId);
+    }
+  },
+
+  // Mock withdraw bid
+  _mockWithdrawBid(projectId, bidId) {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser) {
+      throw new Error('Not authenticated');
+    }
+    
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    const bidIndex = projects[projectIndex].bids?.findIndex(b => b._id === bidId);
+    
+    if (bidIndex === -1 || !projects[projectIndex].bids) {
+      throw new Error('Bid not found');
+    }
+    
+    const bid = projects[projectIndex].bids[bidIndex];
+    if (bid.companyId !== (currentUser.companyId || currentUser._id)) {
+      throw new Error('Not authorized to withdraw this bid');
+    }
+    
+    if (bid.status !== 'pending') {
+      throw new Error('Only pending bids can be withdrawn');
+    }
+    
+    projects[projectIndex].bids[bidIndex].status = 'withdrawn';
+    projects[projectIndex].bids[bidIndex].withdrawnAt = new Date().toISOString();
+    
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      project: projects[projectIndex],
+      message: 'Bid withdrawn successfully'
+    };
+  },
+
+  // // ✅ NEW: Get invitations (alias for getCompanyInvitations)
+  // async getInvitations() {
+  //   console.log('📩 Fetching company invitations');
+  //   return this.getCompanyInvitations();
+  // },
+
+  // ✅ NEW: Get project statistics
+  async getStats(projectId) {
+    console.log('📊 Fetching project stats for:', projectId);
+    try {
+      const data = await fetchWithAuth(`/projects/${projectId}/stats`);
+      if (data) {
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockGetStats(projectId);
+    } catch (error) {
+      console.log('🔄 Error fetching project stats, using mock');
+      return this._mockGetStats(projectId);
+    }
+  },
+
+  // Mock get project stats
+  _mockGetStats(projectId) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const project = projects.find(p => p._id === projectId);
+    
+    if (!project) {
+      throw new Error('Project not found');
+    }
+    
+    return {
+      success: true,
+      stats: {
+        totalBids: project.bids?.length || 0,
+        pendingBids: project.bids?.filter(b => b.status === 'pending').length || 0,
+        acceptedBids: project.bids?.filter(b => b.status === 'accepted').length || 0,
+        rejectedBids: project.bids?.filter(b => b.status === 'rejected').length || 0,
+        viewCount: project.viewCount || 0,
+        avgBidAmount: project.bids?.length > 0 
+          ? project.bids.reduce((sum, b) => sum + (b.amount || 0), 0) / project.bids.length 
+          : 0
+      }
+    };
+  },
+
+  // // ✅ NEW: Search projects with advanced filters
+  // async search(filters = {}) {
+  //   console.log('🔍 Searching projects with filters:', filters);
+  //   // Use getAll with search filters
+  //   return this.getAll(filters);
+  // },
+
+  // ✅ NEW: Get project categories
+  async getCategories() {
+    console.log('📁 Fetching project categories');
+    try {
+      const data = await fetchWithAuth('/projects/categories');
+      if (data) {
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockGetCategories();
+    } catch (error) {
+      console.log('🔄 Error fetching categories, using mock');
+      return this._mockGetCategories();
+    }
+  },
+
+  // Mock get categories
+  _mockGetCategories() {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const categories = [...new Set(projects.map(p => p.category).filter(Boolean))];
+    
+    return {
+      success: true,
+      categories: categories.map(cat => ({
+        id: cat,
+        name: cat.charAt(0).toUpperCase() + cat.slice(1),
+        count: projects.filter(p => p.category === cat).length
+      }))
     };
   }
 };
 
 // ==========================================
-// Companies API
+// Companies API - ENHANCED SECTION
 // ==========================================
 export const companyAPI = {
+  // ==========================================
+  // EXISTING FUNCTIONS (updated)
+  // ==========================================
+
   // Get all companies
   async getAll(filters = {}) {
+    console.log('🏢 Fetching companies with filters:', filters);
     try {
       const queryParams = new URLSearchParams(filters).toString();
       const data = await fetchWithAuth(`/companies${queryParams ? `?${queryParams}` : ''}`);
       
-      if (data) return data;
+      if (data) {
+        console.log(`✅ Found ${data.companies?.length || 0} companies from backend`);
+        return data;
+      }
       
+      console.log('🔄 Backend returned null, using mock');
       return this._mockGetAll(filters);
     } catch (error) {
+      console.log('🔄 Error fetching companies, using mock');
       return this._mockGetAll(filters);
     }
   },
@@ -778,6 +1671,7 @@ export const companyAPI = {
   // Mock get all companies
   _mockGetAll(filters = {}) {
     const companies = JSON.parse(localStorage.getItem('companies') || '[]');
+    console.log(`🔄 Using ${companies.length} mock companies from localStorage`);
     
     let filteredCompanies = [...companies];
     
@@ -794,22 +1688,42 @@ export const companyAPI = {
         c.services?.some(s => s.toLowerCase().includes(search))
       );
     }
+    if (filters.location) {
+      filteredCompanies = filteredCompanies.filter(c => 
+        c.location?.toLowerCase().includes(filters.location.toLowerCase())
+      );
+    }
+    if (filters.minRating) {
+      filteredCompanies = filteredCompanies.filter(c => 
+        (c.ratings?.average || 0) >= parseFloat(filters.minRating)
+      );
+    }
     
     return {
       success: true,
       companies: filteredCompanies,
-      total: filteredCompanies.length
+      total: filteredCompanies.length,
+      filters: {
+        categoryCounts: [],
+        priceRanges: []
+      }
     };
   },
 
   // Get company by ID
   async getById(companyId) {
+    console.log('🏢 Fetching company by ID:', companyId);
     try {
       const data = await fetchWithAuth(`/companies/${companyId}`);
-      if (data) return data;
+      if (data) {
+        console.log('✅ Found company from backend');
+        return data;
+      }
       
+      console.log('🔄 Backend returned null, using mock');
       return this._mockGetById(companyId);
     } catch (error) {
+      console.log('🔄 Error fetching company, using mock');
       return this._mockGetById(companyId);
     }
   },
@@ -829,18 +1743,91 @@ export const companyAPI = {
     };
   },
 
+  // Get invitations
+  async getInvitations() {
+    console.log('📩 Fetching company invitations');
+  
+    try {
+      const currentUser = authAPI.getCachedUser();
+      if (!currentUser || currentUser.type !== 'company') {
+        console.log('⚠️ User is not a company, returning empty invitations');
+        return { success: true, invitations: [] };
+      }
+
+      // âœ… FIX: Check if companyId exists first
+      if (!currentUser.companyId && !currentUser._id) {
+        console.warn('⚠️ No companyId found for user');
+        return { success: true, invitations: [] };
+      }
+
+      const companyId = currentUser.companyId || currentUser._id;
+    
+      // âœ… FIX: Use the correct endpoint (no company ID in path)
+      const data = await fetchWithAuth(`/companies/${companyId}/invitations`);
+    
+      if (data) {
+        console.log(`✅ Found ${data.invitations?.length || 0} invitations from backend`);
+        return data;
+      }
+    
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockGetCompanyInvitations(companyId);
+    
+    } catch (error) {
+      console.log('🔄 Error fetching invitations:', error.message);
+    
+      const currentUser = authAPI.getCachedUser();
+      if (!currentUser) {
+        return { success: true, invitations: [] };
+      }
+    
+      const companyId = currentUser.companyId || currentUser._id;
+      return this._mockGetCompanyInvitations(companyId);
+    }
+  },
+
+  // Mock get invitations
+  _mockGetInvitations() {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser) {
+      return { success: true, invitations: [] };
+    }
+    
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    
+    const invitations = projects.filter(p => 
+      p.invitedCompanies && 
+      p.invitedCompanies.includes(currentUser._id) &&
+      ['posted', 'bidding'].includes(p.status)
+    );
+    
+    return {
+      success: true,
+      invitations: invitations.map(project => ({
+        ...project,
+        hasBid: project.bids?.some(bid => bid.companyId === currentUser._id) || false
+      }))
+    };
+  },
+
   // Request verification
   async requestVerification(verificationData) {
+    console.log('✅ Requesting company verification');
     try {
       const data = await fetchWithAuth('/companies/verification/request', {
         method: 'POST',
         body: JSON.stringify(verificationData)
       });
       
-      if (data) return data;
+      if (data) {
+        console.log('✅ Verification request sent via backend');
+        return data;
+      }
       
+      console.log('🔄 Backend returned null, using mock');
       return this._mockRequestVerification(verificationData);
     } catch (error) {
+      console.log('🔄 Error requesting verification, using mock');
       return this._mockRequestVerification(verificationData);
     }
   },
@@ -879,6 +1866,815 @@ export const companyAPI = {
       success: true,
       request: newRequest
     };
+  },
+
+  // ==========================================
+  // NEW FUNCTIONS (based on backend routes)
+  // ==========================================
+
+  // ✅ NEW: Create company profile
+  async create(companyData) {
+    console.log('🏢 Creating company profile:', companyData.name);
+    try {
+      const data = await fetchWithAuth('/companies', {
+        method: 'POST',
+        body: JSON.stringify(companyData)
+      });
+      
+      if (data) {
+        console.log('✅ Company profile created via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockCreate(companyData);
+    } catch (error) {
+      console.log('🔄 Error creating company profile, using mock');
+      return this._mockCreate(companyData);
+    }
+  },
+
+  // Mock create company
+  _mockCreate(companyData) {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser || currentUser.type !== 'company') {
+      throw new Error('Only companies can create profiles');
+    }
+    
+    const companies = JSON.parse(localStorage.getItem('companies') || '[]');
+    
+    const newCompany = {
+      _id: Date.now().toString(),
+      userId: currentUser._id,
+      ...companyData,
+      verified: false,
+      verificationStatus: 'pending',
+      ratings: {
+        average: 0,
+        count: 0,
+        reviews: []
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    
+    companies.push(newCompany);
+    localStorage.setItem('companies', JSON.stringify(companies));
+    
+    // Update current user with companyId
+    currentUser.companyId = newCompany._id;
+    localStorage.setItem('currentUser', JSON.stringify(currentUser));
+    
+    return {
+      success: true,
+      company: newCompany,
+      message: 'Company profile created successfully'
+    };
+  },
+
+  // ✅ NEW: Update company profile
+  async update(companyId, companyData) {
+    console.log('✏️ Updating company profile:', companyId);
+    try {
+      const data = await fetchWithAuth(`/companies/${companyId}`, {
+        method: 'PUT',
+        body: JSON.stringify(companyData)
+      });
+      
+      if (data) {
+        console.log('✅ Company profile updated via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockUpdate(companyId, companyData);
+    } catch (error) {
+      console.log('🔄 Error updating company profile, using mock');
+      return this._mockUpdate(companyId, companyData);
+    }
+  },
+
+  // Mock update company
+  _mockUpdate(companyId, companyData) {
+    const currentUser = authAPI.getCachedUser();
+    const companies = JSON.parse(localStorage.getItem('companies') || '[]');
+    const companyIndex = companies.findIndex(c => c._id === companyId);
+    
+    if (companyIndex === -1) {
+      throw new Error('Company not found');
+    }
+    
+    // Check ownership
+    if (companies[companyIndex].userId !== currentUser._id && currentUser.type !== 'admin') {
+      throw new Error('Not authorized to update this company');
+    }
+    
+    companies[companyIndex] = {
+      ...companies[companyIndex],
+      ...companyData,
+      updatedAt: new Date().toISOString()
+    };
+    
+    localStorage.setItem('companies', JSON.stringify(companies));
+    
+    return {
+      success: true,
+      company: companies[companyIndex],
+      message: 'Company profile updated successfully'
+    };
+  },
+
+  // ✅ NEW: Get company dashboard stats
+  async getDashboard(companyId) {
+    console.log('📊 Fetching company dashboard:', companyId);
+    try {
+      const data = await fetchWithAuth(`/companies/${companyId}/dashboard`);
+      if (data) {
+        console.log('✅ Dashboard data fetched from backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockGetDashboard(companyId);
+    } catch (error) {
+      console.log('🔄 Error fetching dashboard, using mock');
+      return this._mockGetDashboard(companyId);
+    }
+  },
+
+  // Mock get dashboard
+  _mockGetDashboard(companyId) {
+    const currentUser = authAPI.getCachedUser();
+    const companies = JSON.parse(localStorage.getItem('companies') || '[]');
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    
+    const company = companies.find(c => c._id === companyId);
+    if (!company) {
+      throw new Error('Company not found');
+    }
+    
+    // Calculate stats
+    const activeProjects = projects.filter(p => 
+      p.bids && p.bids.some(bid => 
+        bid.companyId === companyId && 
+        bid.status === 'accepted' && 
+        p.status === 'active'
+      )
+    ).length;
+    
+    const completedProjects = projects.filter(p => 
+      p.bids && p.bids.some(bid => 
+        bid.companyId === companyId && 
+        bid.status === 'accepted' && 
+        p.status === 'completed'
+      )
+    ).length;
+    
+    const pendingBids = projects.filter(p => 
+      p.bids && p.bids.some(bid => 
+        bid.companyId === companyId && 
+        bid.status === 'pending'
+      )
+    ).length;
+    
+    const activeInvitations = projects.filter(p => 
+      p.invitedCompanies && 
+      p.invitedCompanies.includes(companyId) &&
+      ['posted', 'bidding'].includes(p.status)
+    ).length;
+    
+    // Calculate revenue
+    const acceptedBids = projects.flatMap(p => 
+      (p.bids || []).filter(bid => 
+        bid.companyId === companyId && 
+        bid.status === 'accepted'
+      )
+    );
+    
+    const totalRevenue = acceptedBids.reduce((sum, bid) => sum + (bid.amount || 0), 0);
+    
+    return {
+      success: true,
+      dashboard: {
+        stats: {
+          activeProjects,
+          completedProjects,
+          pendingBids,
+          activeInvitations,
+          unreadNotifications: 0
+        },
+        revenue: {
+          totalRevenue,
+          avgRevenue: completedProjects > 0 ? totalRevenue / completedProjects : 0,
+          projectCount: completedProjects
+        },
+        recentNotifications: [],
+        verificationStatus: company.verificationStatus || 'pending',
+        profileCompletion: this._calculateProfileCompletion(company)
+      }
+    };
+  },
+
+  // ✅ NEW: Add portfolio item
+  async addPortfolio(companyId, portfolioData) {
+    console.log('🎨 Adding portfolio item for company:', companyId);
+    try {
+      const data = await fetchWithAuth(`/companies/${companyId}/portfolio`, {
+        method: 'POST',
+        body: JSON.stringify(portfolioData)
+      });
+      
+      if (data) {
+        console.log('✅ Portfolio item added via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockAddPortfolio(companyId, portfolioData);
+    } catch (error) {
+      console.log('🔄 Error adding portfolio item, using mock');
+      return this._mockAddPortfolio(companyId, portfolioData);
+    }
+  },
+
+  // Mock add portfolio
+  _mockAddPortfolio(companyId, portfolioData) {
+    const currentUser = authAPI.getCachedUser();
+    const companies = JSON.parse(localStorage.getItem('companies') || '[]');
+    const companyIndex = companies.findIndex(c => c._id === companyId);
+    
+    if (companyIndex === -1) {
+      throw new Error('Company not found');
+    }
+    
+    // Check ownership
+    if (companies[companyIndex].userId !== currentUser._id && currentUser.type !== 'admin') {
+      throw new Error('Not authorized to add portfolio');
+    }
+    
+    const portfolioItem = {
+      ...portfolioData,
+      _id: Date.now().toString(),
+      createdAt: new Date().toISOString()
+    };
+    
+    if (!companies[companyIndex].portfolio) {
+      companies[companyIndex].portfolio = [];
+    }
+    
+    companies[companyIndex].portfolio.push(portfolioItem);
+    companies[companyIndex].updatedAt = new Date().toISOString();
+    
+    localStorage.setItem('companies', JSON.stringify(companies));
+    
+    return {
+      success: true,
+      portfolioItem,
+      message: 'Portfolio item added successfully'
+    };
+  },
+
+  // ✅ NEW: Respond to invitation (accept/decline)
+  async respondToInvitation(companyId, projectId, response, reason = '') {
+    console.log(`📩 Responding to invitation: ${response} for project:`, projectId);
+    try {
+      const data = await fetchWithAuth(`/companies/${companyId}/invitations/${projectId}/respond`, {
+        method: 'POST',
+        body: JSON.stringify({ response, reason })
+      });
+      
+      if (data) {
+        console.log('✅ Invitation response sent via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockRespondToInvitation(companyId, projectId, response, reason);
+    } catch (error) {
+      console.log('🔄 Error responding to invitation, using mock');
+      return this._mockRespondToInvitation(companyId, projectId, response, reason);
+    }
+  },
+
+  // Mock respond to invitation
+  _mockRespondToInvitation(companyId, projectId, response, reason) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    if (response === 'decline') {
+      // Remove from invited list
+      projects[projectIndex].invitedCompanies = 
+        projects[projectIndex].invitedCompanies?.filter(id => id !== companyId) || [];
+    }
+    
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      message: `Invitation ${response}d successfully${reason ? `: ${reason}` : ''}`,
+      data: {
+        response,
+        projectId,
+        companyId,
+        reason
+      }
+    };
+  },
+
+  // ✅ NEW: Get company's bids and projects
+  async getCompanyBids(companyId, filters = {}) {
+    console.log('📋 Fetching company bids for:', companyId);
+    try {
+      const queryParams = new URLSearchParams(filters).toString();
+      const data = await fetchWithAuth(`/companies/${companyId}/bids${queryParams ? `?${queryParams}` : ''}`);
+      
+      if (data) {
+        console.log(`✅ Found ${data.bids?.length || 0} company bids from backend`);
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockGetCompanyBids(companyId, filters);
+    } catch (error) {
+      console.log('🔄 Error fetching company bids, using mock');
+      return this._mockGetCompanyBids(companyId, filters);
+    }
+  },
+
+  // Mock get company bids
+  _mockGetCompanyBids(companyId, filters = {}) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const companies = JSON.parse(localStorage.getItem('companies') || '[]');
+    const company = companies.find(c => c._id === companyId);
+    
+    if (!company) {
+      throw new Error('Company not found');
+    }
+    
+    // Get all bids from this company
+    const allBids = [];
+    
+    projects.forEach(project => {
+      if (project.bids) {
+        project.bids.forEach(bid => {
+          if (bid.companyId === companyId) {
+            allBids.push({
+              ...bid,
+              projectId: project._id,
+              projectTitle: project.title,
+              projectCategory: project.category,
+              projectStatus: project.status,
+              clientName: project.clientName
+            });
+          }
+        });
+      }
+    });
+    
+    // Apply filters
+    let filteredBids = allBids;
+    
+    if (filters.status && filters.status !== 'all') {
+      filteredBids = filteredBids.filter(b => b.status === filters.status);
+    }
+    
+    if (filters.type === 'active') {
+      filteredBids = filteredBids.filter(b => b.projectStatus === 'active');
+    } else if (filters.type === 'completed') {
+      filteredBids = filteredBids.filter(b => b.projectStatus === 'completed');
+    } else if (filters.type === 'open') {
+      filteredBids = filteredBids.filter(b => ['posted', 'bidding'].includes(b.projectStatus));
+    }
+    
+    // Get bid statistics
+    const pendingBids = allBids.filter(b => b.status === 'pending').length;
+    const acceptedBids = allBids.filter(b => b.status === 'accepted' && b.projectStatus === 'active').length;
+    const rejectedBids = allBids.filter(b => b.status === 'rejected').length;
+    
+    return {
+      success: true,
+      bids: filteredBids,
+      pagination: {
+        page: 1,
+        limit: filteredBids.length,
+        total: filteredBids.length,
+        totalPages: 1
+      },
+      stats: {
+        pending: pendingBids,
+        accepted: acceptedBids,
+        rejected: rejectedBids,
+        totalBids: allBids.length
+      }
+    };
+  },
+
+  // ✅ NEW: Invite company to bid on a project (client only)
+  async inviteToBid(companyId, projectId, message = '') {
+    console.log('🤝 Inviting company to bid:', { companyId, projectId });
+    try {
+      const data = await fetchWithAuth(`/companies/${companyId}/invite`, {
+        method: 'POST',
+        body: JSON.stringify({ projectId, message })
+      });
+      
+      if (data) {
+        console.log('✅ Invitation sent via backend');
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockInviteToBid(companyId, projectId, message);
+    } catch (error) {
+      console.log('🔄 Error sending invitation, using mock');
+      return this._mockInviteToBid(companyId, projectId, message);
+    }
+  },
+
+  // Mock invite to bid
+  _mockInviteToBid(companyId, projectId, message) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const projectIndex = projects.findIndex(p => p._id === projectId);
+    
+    if (projectIndex === -1) {
+      throw new Error('Project not found');
+    }
+    
+    if (!projects[projectIndex].invitedCompanies) {
+      projects[projectIndex].invitedCompanies = [];
+    }
+    
+    // Check if already invited
+    if (projects[projectIndex].invitedCompanies.includes(companyId)) {
+      throw new Error('Company already invited to this project');
+    }
+    
+    projects[projectIndex].invitedCompanies.push(companyId);
+    projects[projectIndex].updatedAt = new Date().toISOString();
+    
+    localStorage.setItem('projects', JSON.stringify(projects));
+    
+    return {
+      success: true,
+      message: `Invitation sent to company`,
+      data: {
+        companyId,
+        projectId,
+        projectTitle: projects[projectIndex].title,
+        message
+      }
+    };
+  },
+
+  // ✅ NEW: Get company invitations (specific company)
+  async getCompanyInvitations(companyId) {
+    console.log('📩 Fetching invitations for company:', companyId);
+    try {
+      const data = await fetchWithAuth(`/companies/${companyId}/invitations`);
+      if (data) {
+        console.log(`✅ Found ${data.invitations?.length || 0} invitations from backend`);
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockGetCompanyInvitations(companyId);
+    } catch (error) {
+      console.log('🔄 Error fetching company invitations, using mock');
+      return this._mockGetCompanyInvitations(companyId);
+    }
+  },
+
+  // Mock get company invitations
+  _mockGetCompanyInvitations(companyId) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const companies = JSON.parse(localStorage.getItem('companies') || '[]');
+    const company = companies.find(c => c._id === companyId);
+    
+    if (!company) {
+      throw new Error('Company not found');
+    }
+    
+    const invitations = projects.filter(p => 
+      p.invitedCompanies && 
+      p.invitedCompanies.includes(companyId) &&
+      ['posted', 'bidding', 'active'].includes(p.status)
+    );
+    
+    const invitationsWithStats = invitations.map(project => {
+      const existingBid = project.bids?.find(bid => bid.companyId === companyId);
+      const totalBids = project.bids?.length || 0;
+      
+      return {
+        ...project,
+        hasBid: !!existingBid,
+        bidStatus: existingBid ? existingBid.status : null,
+        totalBids,
+        daysRemaining: project.expiresAt 
+          ? Math.ceil((new Date(project.expiresAt) - new Date()) / (1000 * 60 * 60 * 24))
+          : null
+      };
+    });
+    
+    return {
+      success: true,
+      invitations: invitationsWithStats
+    };
+  },
+
+  // // ✅ NEW: Search companies with advanced filters
+  // async search(filters = {}) {
+  //   console.log('🔍 Searching companies with filters:', filters);
+  //   // Use getAll with search filters
+  //   return this.getAll(filters);
+  // },
+
+  // ✅ NEW: Get company categories
+  async getCategories() {
+    console.log('📁 Fetching company categories');
+    try {
+      const data = await fetchWithAuth('/companies/categories');
+      if (data) {
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockGetCategories();
+    } catch (error) {
+      console.log('🔄 Error fetching categories, using mock');
+      return this._mockGetCategories();
+    }
+  },
+
+  // Mock get categories
+  _mockGetCategories() {
+    const companies = JSON.parse(localStorage.getItem('companies') || '[]');
+    const categories = [...new Set(companies.map(c => c.category).filter(Boolean))];
+    
+    return {
+      success: true,
+      categories: categories.map(cat => ({
+        id: cat,
+        name: cat.charAt(0).toUpperCase() + cat.slice(1),
+        count: companies.filter(c => c.category === cat).length
+      }))
+    };
+  },
+
+  // ✅ NEW: Get verified companies
+  async getVerified(filters = {}) {
+    console.log('✅ Fetching verified companies');
+    return this.getAll({ ...filters, verified: true });
+  },
+
+  // ✅ NEW: Get company statistics
+  async getStats(companyId) {
+    console.log('📊 Fetching company statistics:', companyId);
+    try {
+      const data = await fetchWithAuth(`/companies/${companyId}/stats`);
+      if (data) {
+        return data;
+      }
+      
+      console.log('🔄 Backend returned null, using mock');
+      return this._mockGetStats(companyId);
+    } catch (error) {
+      console.log('🔄 Error fetching company stats, using mock');
+      return this._mockGetStats(companyId);
+    }
+  },
+
+  // Mock get company stats
+  _mockGetStats(companyId) {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const companies = JSON.parse(localStorage.getItem('companies') || '[]');
+    const company = companies.find(c => c._id === companyId);
+    
+    if (!company) {
+      throw new Error('Company not found');
+    }
+    
+    // Calculate stats
+    const companyBids = projects.flatMap(p => 
+      (p.bids || []).filter(bid => bid.companyId === companyId)
+    );
+    
+    const acceptedBids = companyBids.filter(b => b.status === 'accepted');
+    const pendingBids = companyBids.filter(b => b.status === 'pending');
+    const rejectedBids = companyBids.filter(b => b.status === 'rejected');
+    
+    const totalEarned = acceptedBids.reduce((sum, b) => sum + (b.amount || 0), 0);
+    const successRate = companyBids.length > 0 ? 
+      (acceptedBids.length / companyBids.length) * 100 : 0;
+    
+    return {
+      success: true,
+      stats: {
+        totalBids: companyBids.length,
+        acceptedBids: acceptedBids.length,
+        pendingBids: pendingBids.length,
+        rejectedBids: rejectedBids.length,
+        totalEarned,
+        avgProjectValue: acceptedBids.length > 0 ? 
+          totalEarned / acceptedBids.length : 0,
+        successRate,
+        responseTime: 24
+      }
+    };
+  },
+
+  // ✅ HELPER: Calculate profile completion percentage
+  _calculateProfileCompletion(company) {
+    const fields = [
+      { field: 'name', weight: 10 },
+      { field: 'description', weight: 15 },
+      { field: 'services', weight: 15, check: (val) => val && val.length > 0 },
+      { field: 'portfolio', weight: 20, check: (val) => val && val.length > 0 },
+      { field: 'location', weight: 10 },
+      { field: 'website', weight: 5 },
+      { field: 'teamSize', weight: 5 },
+      { field: 'yearsInBusiness', weight: 5 },
+      { field: 'logo', weight: 10 },
+      { field: 'tagline', weight: 5 }
+    ];
+
+    let completion = 0;
+    let totalWeight = 0;
+
+    fields.forEach(({ field, weight, check }) => {
+      totalWeight += weight;
+      if (check) {
+        if (check(company[field])) completion += weight;
+      } else if (company[field]) {
+        completion += weight;
+      }
+    });
+
+    return Math.round((completion / totalWeight) * 100);
+  }
+};
+
+// ==========================================
+// User API - NEW SECTION (for Dashboard analytics)
+// ==========================================
+export const userAPI = {
+  // Get client analytics - FIXED: matches DashboardPage.jsx call
+  async getClientAnalytics() {
+    try {
+      const data = await fetchWithAuth('/users/analytics/client');
+      if (data) return data;
+      
+      return this._mockGetClientAnalytics();
+    } catch (error) {
+      return this._mockGetClientAnalytics();
+    }
+  },
+
+  // Mock get client analytics
+  _mockGetClientAnalytics() {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser || currentUser.type !== 'client') {
+      throw new Error('Not authorized or not a client');
+    }
+    
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const userProjects = projects.filter(p => p.clientId === currentUser._id);
+    
+    const totalBids = userProjects.reduce((sum, p) => sum + (p.bids?.length || 0), 0);
+    const acceptedBids = userProjects.reduce((sum, p) => 
+      sum + (p.bids?.filter(b => b.status === 'accepted').length || 0), 0
+    );
+    const activeProjects = userProjects.filter(p => p.status === 'active').length;
+    const completedProjects = userProjects.filter(p => p.status === 'completed').length;
+    
+    const totalSpent = userProjects.reduce((sum, p) => {
+      const acceptedBid = p.bids?.find(b => b.status === 'accepted');
+      return sum + (acceptedBid?.amount || 0);
+    }, 0);
+    
+    return {
+      success: true,
+      metrics: {
+        totalProjects: userProjects.length,
+        totalBids,
+        acceptedBids,
+        activeProjects,
+        completedProjects,
+        totalSpent,
+        avgBidAmount: totalBids > 0 ? 
+          userProjects.reduce((sum, p) => 
+            sum + (p.bids?.reduce((bidSum, b) => bidSum + b.amount, 0) || 0), 0
+          ) / totalBids : 0
+      }
+    };
+  },
+
+  // Get company analytics - FIXED: matches DashboardPage.jsx call
+  async getCompanyAnalytics() {
+    try {
+      const data = await fetchWithAuth('/users/analytics/company');
+      if (data) return data;
+      
+      return this._mockGetCompanyAnalytics();
+    } catch (error) {
+      return this._mockGetCompanyAnalytics();
+    }
+  },
+
+  // Mock get company analytics
+  _mockGetCompanyAnalytics() {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser || currentUser.type !== 'company') {
+      throw new Error('Not authorized or not a company');
+    }
+    
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const companyBids = projects.flatMap(p => 
+      (p.bids || []).filter(b => b.companyId === (currentUser.companyId || currentUser._id))
+    );
+    
+    const acceptedBids = companyBids.filter(b => b.status === 'accepted');
+    const pendingBids = companyBids.filter(b => b.status === 'pending');
+    const rejectedBids = companyBids.filter(b => b.status === 'rejected');
+    
+    const totalEarned = acceptedBids.reduce((sum, b) => sum + (b.amount || 0), 0);
+    const successRate = companyBids.length > 0 ? 
+      (acceptedBids.length / companyBids.length) * 100 : 0;
+    
+    return {
+      success: true,
+      metrics: {
+        totalBids: companyBids.length,
+        acceptedBids: acceptedBids.length,
+        pendingBids: pendingBids.length,
+        rejectedBids: rejectedBids.length,
+        totalEarned,
+        avgProjectValue: acceptedBids.length > 0 ? 
+          totalEarned / acceptedBids.length : 0,
+        successRate,
+        responseTime: 24 // Mock average response time in hours
+      }
+    };
+  },
+
+  // Get user profile - FIXED: matches DashboardPage.jsx call
+  async getProfile() {
+    try {
+      const data = await fetchWithAuth('/users/profile');
+      if (data) return data;
+      
+      return this._mockGetProfile();
+    } catch (error) {
+      return this._mockGetProfile();
+    }
+  },
+
+  // Mock get profile
+  _mockGetProfile() {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser) {
+      throw new Error('Not authenticated');
+    }
+    
+    return {
+      success: true,
+      user: currentUser
+    };
+  },
+
+  // Update profile
+  async updateProfile(profileData) {
+    try {
+      const data = await fetchWithAuth('/users/profile', {
+        method: 'PUT',
+        body: JSON.stringify(profileData)
+      });
+      
+      if (data) return data;
+      
+      return this._mockUpdateProfile(profileData);
+    } catch (error) {
+      return this._mockUpdateProfile(profileData);
+    }
+  },
+
+  // Mock update profile
+  _mockUpdateProfile(profileData) {
+    const currentUser = authAPI.getCachedUser();
+    if (!currentUser) {
+      throw new Error('Not authenticated');
+    }
+    
+    const updatedUser = { ...currentUser, ...profileData, updatedAt: new Date().toISOString() };
+    localStorage.setItem('currentUser', JSON.stringify(updatedUser));
+    
+    return {
+      success: true,
+      user: updatedUser
+    };
   }
 };
 
@@ -886,7 +2682,7 @@ export const companyAPI = {
 // Notifications API
 // ==========================================
 export const notificationAPI = {
-  // Get notifications
+  // Get notifications - FIXED: matches DashboardPage.jsx call
   async getNotifications(params = {}) {
     try {
       const queryParams = new URLSearchParams(params).toString();

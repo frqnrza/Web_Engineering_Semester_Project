@@ -6,15 +6,15 @@ import { VerifiedBadge } from "./VerifiedBadge";
 export function CompanyCard({
   logo,
   name,
-  verified,
-  tagline,
-  services,
-  rating,
-  reviewCount,
-  startingPrice,
-  matchCount,
-  onViewProfile,
-  onInviteToBid,
+  verified = false,
+  tagline = '',
+  services = [],
+  rating = 0,
+  reviewCount = 0,
+  startingPrice = '',
+  matchCount = 0,
+  onViewProfile = () => {},
+  onInviteToBid = () => {},
   variant = 'grid'
 }) {
   if (variant === 'list') {
@@ -38,7 +38,7 @@ export function CompanyCard({
             </div>
             <p className="text-sm text-gray-600 mb-2">{tagline}</p>
             <div className="flex flex-wrap gap-2 mb-2">
-              {services.map((service, idx) => (
+              {services?.map((service, idx) => (
                 <Badge key={idx} variant="secondary" className="bg-gray-100 text-gray-700 text-xs">
                   {service}
                 </Badge>
@@ -102,7 +102,7 @@ export function CompanyCard({
             <h4 className="text-[#0A2540] font-semibold">{name}</h4>
             {verified && <VerifiedBadge />}
           </div>
-          {matchCount && (
+          {matchCount > 0 && (
             <span className="text-xs text-[#008C7E]">{matchCount} matches</span>
           )}
         </div>
@@ -111,7 +111,7 @@ export function CompanyCard({
       <p className="text-sm text-gray-600 mb-3">{tagline}</p>
       
       <div className="flex flex-wrap gap-1.5 mb-3">
-        {services.slice(0, 3).map((service, idx) => (
+        {services?.slice(0, 3).map((service, idx) => (
           <Badge key={idx} variant="secondary" className="bg-gray-100 text-gray-700 text-xs">
             {service}
           </Badge>

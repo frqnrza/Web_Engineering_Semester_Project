@@ -1,19 +1,16 @@
-import { Progress } from "./progress";
+import * as React from "react"
 
-function DownloadProgress() {
-  const [progress, setProgress] = React.useState(0);
-
-  React.useEffect(() => {
-    const timer = setInterval(() => {
-      setProgress((prev) => (prev >= 100 ? 0 : prev + 10));
-    }, 500);
-    return () => clearInterval(timer);
-  }, []);
-
+// ✅ Named Export: This allows 'import { Progress }' to work
+export function Progress({ value, className, ...props }) {
   return (
-    <div className="space-y-2">
-      <Progress value={progress} />
-      <p className="text-sm">{progress}% complete</p>
+    <div
+      className={`relative h-4 w-full overflow-hidden rounded-full bg-gray-100 ${className || ""}`}
+      {...props}
+    >
+      <div
+        className="h-full w-full flex-1 bg-[#008C7E] transition-all duration-500 ease-in-out"
+        style={{ transform: `translateX(-${100 - (value || 0)}%)` }}
+      />
     </div>
-  );
+  )
 }
